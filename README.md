@@ -26,22 +26,22 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 ## Run Examples
 ```bash
 # Linux (default open-vuln filter)
-./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200"
+./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200" -output results.json
 
 # macOS
-./starlark-runner-mac -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET"
+./starlark-runner-mac -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET" -output results.json
 
 # Linux with safety cap and retry tuning
-./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3"
+./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3" -output results.json
 
 # Linux with explicit vulnerability filter
-./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,vuln_filter=status:'open'"
+./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,vuln_filter=status:'open'" -output results.json
 
 # Mock mode (offline validation)
 ./starlark-runner-linux -script crowdstrike.star -params "mock_mode=true"
 
 # Save output to JSON
-./starlark-runner-linux -script crowdstrike.star -output results.json -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET"
+./starlark-runner-linux -script crowdstrike.star -output results.json -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET" -output results.json
 ```
 
 ## Behavior

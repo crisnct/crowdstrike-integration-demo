@@ -36,6 +36,16 @@ def main(**kwargs):
 
     pb = zafran.proto_file
 
+    if mock_mode:
+        log.info(
+            "Starting mock run: page_size=%d, max_pages=%d, max_retries=%d"
+            % (page_size, max_pages, max_retries)
+        )
+        _collect_mock_data(pb)
+        zafran.flush()
+        log.info("Mock run complete")
+        return None
+
     if not client_id or not client_secret:
         log.error("Missing client_id/api_key or api_secret")
         return None
@@ -59,12 +69,6 @@ def main(**kwargs):
         "Starting run: page_size=%d, max_pages=%d, max_retries=%d, mock_mode=%s"
         % (page_size, max_pages, max_retries, str(mock_mode))
     )
-
-    if mock_mode:
-        _collect_mock_data(pb)
-        zafran.flush()
-        log.info("Mock run complete")
-        return None
 
     # Collect assets
     instance_ids = collect_devices(auth, page_size, max_pages, pb)
