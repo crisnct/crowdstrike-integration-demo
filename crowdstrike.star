@@ -453,17 +453,17 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
     while True:
         if traversal["page"] > max_pages:
-            _set_vuln_stop_reason(traversal, stats, "reached_max_pages")
+            _set_vuln_stop_reason(stats, "reached_max_pages")
             log.warn("Reached max_pages while collecting vulnerabilities: %d" % max_pages)
             break
 
         vulns, next_after = fetch_vulnerabilities(auth, page_size, traversal["after_token"], effective_filter)
         if not vulns:
             if traversal["page"] == 1:
-                _set_vuln_stop_reason(traversal, stats, "no_vulnerabilities_first_page")
+                _set_vuln_stop_reason(stats, "no_vulnerabilities_first_page")
                 log.info("No vulnerabilities returned")
             else:
-                _set_vuln_stop_reason(traversal, stats, "no_more_vulnerabilities")
+                _set_vuln_stop_reason(stats, "no_more_vulnerabilities")
             break
 
         stats["pages_processed"] += 1
@@ -496,7 +496,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
             page_size,
         )
         if not should_continue:
-            _set_vuln_stop_reason(traversal, stats, stop_reason)
+            _set_vuln_stop_reason(stats, stop_reason)
             if stop_reason == "repeated_after_token":
                 log.warn("Vulnerability cursor repeated, stopping pagination")
             elif stop_reason == "missing_after_token":
@@ -511,12 +511,10 @@ def _new_vuln_traversal_state():
         "page": 1,
         "after_token": "",
         "last_after_key": "",
-        "stop_reason": "completed",
     }
 
 
-def _set_vuln_stop_reason(traversal, stats, stop_reason):
-    traversal["stop_reason"] = stop_reason
+def _set_vuln_stop_reason(stats, stop_reason):
     stats["stop_reason"] = stop_reason
 
 
@@ -529,25 +527,24 @@ def _new_vulnerability_stats():
         "remediation_lookup_requests": 0,
         "remediation_cache_hits": 0,
         "remediation_actions_resolved": 0,
-        "remediation_suggestion_from_api": 0,
+        "remediation_suggestion_from_cache": 0,
         "remediation_suggestion_fallback": 0,
         "stop_reason": "completed",
     }
 
 
 def _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats):
-    cache_hits, lookup_requests, actions_resolved = remediation_stats
-    stats["remediation_cache_hits"] += cache_hits
-    stats["remediation_lookup_requests"] += lookup_requests
-    stats["remediation_actions_resolved"] += actions_resolved
+    """Merge per-page remediation and collection map results into run-level stats."""
+    stats["remediation_cache_hits"] += remediation_stats.get("cache_hits", 0)
+    stats["remediation_lookup_requests"] += remediation_stats.get("lookup_requests", 0)
+    stats["remediation_actions_resolved"] += remediation_stats.get("actions_resolved", 0)
 
-    page_collected, page_skipped_missing_id, page_skipped_unknown_instance, page_used_cache, page_used_fallback = page_collection_stats
-    stats["collected_count"] += page_collected
-    stats["skipped_missing_instance_id"] += page_skipped_missing_id
-    stats["skipped_unknown_instance"] += page_skipped_unknown_instance
+    stats["collected_count"] += page_collection_stats.get("collected_count", 0)
+    stats["skipped_missing_instance_id"] += page_collection_stats.get("skipped_missing_instance_id", 0)
+    stats["skipped_unknown_instance"] += page_collection_stats.get("skipped_unknown_instance", 0)
     # Keep legacy "from_api" summary field name for compatibility with existing logs.
-    stats["remediation_suggestion_from_api"] += page_used_cache
-    stats["remediation_suggestion_fallback"] += page_used_fallback
+    stats["remediation_suggestion_from_cache"] += page_collection_stats.get("remediation_suggestion_from_cache", 0)
+    stats["remediation_suggestion_fallback"] += page_collection_stats.get("remediation_suggestion_fallback", 0)
 
 
 def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediation_ids_seen):
@@ -559,7 +556,10 @@ def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediat
       - updates `remediation_cache` with fetched remediation actions
 
     Returns:
-      Tuple of (cache_hits, lookup_requests, actions_resolved)
+      Map with keys:
+      - cache_hits
+      - lookup_requests
+      - actions_resolved
     """
     page_remediation_ids = _collect_page_remediation_ids(vulns)
     missing_ids = []
@@ -582,7 +582,11 @@ def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediat
             if action:
                 actions_resolved += 1
 
-    return cache_hits, lookup_requests, actions_resolved
+    return {
+        "cache_hits": cache_hits,
+        "lookup_requests": lookup_requests,
+        "actions_resolved": actions_resolved,
+    }
 
 
 def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instance_ids):
@@ -590,13 +594,12 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
     Parse and collect one page of vulnerabilities.
 
     Returns:
-      Tuple of (
-        collected_count,
-        skipped_missing_instance_id,
-        skipped_unknown_instance,
-        remediation_suggestion_from_cache,
-        remediation_suggestion_fallback
-      )
+      Map with keys:
+      - collected_count
+      - skipped_missing_instance_id
+      - skipped_unknown_instance
+      - remediation_suggestion_from_cache
+      - remediation_suggestion_fallback
     """
     collected_count = 0
     skipped_missing_instance_id = 0
@@ -622,13 +625,13 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
         else:
             remediation_suggestion_fallback += 1
 
-    return (
-        collected_count,
-        skipped_missing_instance_id,
-        skipped_unknown_instance,
-        remediation_suggestion_from_cache,
-        remediation_suggestion_fallback,
-    )
+    return {
+        "collected_count": collected_count,
+        "skipped_missing_instance_id": skipped_missing_instance_id,
+        "skipped_unknown_instance": skipped_unknown_instance,
+        "remediation_suggestion_from_cache": remediation_suggestion_from_cache,
+        "remediation_suggestion_fallback": remediation_suggestion_fallback,
+    }
 
 
 def _advance_vuln_state(traversal, next_after, page_count, page_size):
@@ -694,7 +697,8 @@ def _log_vulnerability_summary(stats, remediation_ids_seen):
     log.info(
         "Suggestion source summary: from_api=%d, fallback=%d"
         % (
-            stats["remediation_suggestion_from_api"],
+            # Keep `from_api` label for downstream compatibility; value reflects cache/API-backed resolution path.
+            stats["remediation_suggestion_from_cache"],
             stats["remediation_suggestion_fallback"],
         )
     )
