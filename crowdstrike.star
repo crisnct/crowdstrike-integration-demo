@@ -28,9 +28,9 @@ load("zafran", "zafran")
 # Defaults can be overridden via runner params
 DEFAULT_API_URL = "https://api.us-2.crowdstrike.com"
 DEFAULT_PAGE_SIZE = 100
-DEFAULT_MAX_PAGES = 10
+DEFAULT_MAX_PAGES = 20
 DEFAULT_MAX_RETRIES = 3
-DEVICE_DETAILS_BATCH_SIZE = 10
+DEFAULT_DEVICE_DETAILS_BATCH_SIZE = 100
 REMEDIATION_DETAILS_BATCH_SIZE = 100
 
 def main(**kwargs):
@@ -44,6 +44,7 @@ def main(**kwargs):
     - page_size: Page size for paginated endpoints (default 100)
     - max_pages: Max pages to process per endpoint (default 20)
     - max_retries: Max retry attempts for retryable HTTP statuses (default 3)
+    - device_details_batch_size: Number of device IDs per details hydration request (default 100)
     - vuln_filter: Optional explicit FQL filter for vulnerabilities (default status:'open')
     """
     log.info("Step 0: Parsing configuration parameters...")
@@ -51,9 +52,13 @@ def main(**kwargs):
     log.info("Starting integration with API: %s" % api_url)
     client_id = kwargs.get("client_id", kwargs.get("api_key", ""))
     client_secret = kwargs.get("api_secret", "")
-    page_size = _to_int(kwargs.get("page_size", "100"), DEFAULT_PAGE_SIZE)
-    max_pages = _to_int(kwargs.get("max_pages", "20"), DEFAULT_MAX_PAGES)
-    max_retries = _to_int(kwargs.get("max_retries", "3"), DEFAULT_MAX_RETRIES)
+    page_size = _to_int(kwargs.get("page_size", str(DEFAULT_PAGE_SIZE)), DEFAULT_PAGE_SIZE)
+    max_pages = _to_int(kwargs.get("max_pages", str(DEFAULT_MAX_PAGES)), DEFAULT_MAX_PAGES)
+    max_retries = _to_int(kwargs.get("max_retries", str(DEFAULT_MAX_RETRIES)), DEFAULT_MAX_RETRIES)
+    device_details_batch_size = _to_int(
+        kwargs.get("device_details_batch_size", str(DEFAULT_DEVICE_DETAILS_BATCH_SIZE)),
+        DEFAULT_DEVICE_DETAILS_BATCH_SIZE,
+    )
     vuln_filter = kwargs.get("vuln_filter", "")
     mock_mode = _is_true(kwargs.get("mock_mode", "false"))
 
@@ -90,13 +95,20 @@ def main(**kwargs):
     auth["token"] = token
     log.info("Successfully obtained bearer token")
 
+    if device_details_batch_size <= 0:
+        log.warn(
+            "Invalid device_details_batch_size=%d; using default=%d"
+            % (device_details_batch_size, DEFAULT_DEVICE_DETAILS_BATCH_SIZE)
+        )
+        device_details_batch_size = DEFAULT_DEVICE_DETAILS_BATCH_SIZE
+
     log.info(
-        "Starting run: page_size=%d, max_pages=%d, max_retries=%d"
-        % (page_size, max_pages, max_retries)
+        "Starting run: page_size=%d, max_pages=%d, max_retries=%d, device_details_batch_size=%d"
+        % (page_size, max_pages, max_retries, device_details_batch_size)
     )
 
     log.info("Step 3: Collecting device assets...")
-    instance_ids = collect_devices(auth, page_size, max_pages, pb)
+    instance_ids = collect_devices(auth, page_size, max_pages, device_details_batch_size, pb)
     log.info("Collected %d unique device instances" % len(instance_ids))
 
     log.info("Step 4: Collecting vulnerabilities...")
@@ -140,7 +152,7 @@ def get_bearer_token(api_url, client_id, client_secret):
     return token
 
 
-def collect_devices(auth, page_size, max_pages, pb):
+def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
     """
     Fetch device IDs, hydrate details, map to InstanceData, and collect per page.
 
@@ -148,6 +160,7 @@ def collect_devices(auth, page_size, max_pages, pb):
         auth: Auth dict with api_url, client_id, client_secret, token, max_retries
         page_size: Number of device IDs to request per page
         max_pages: Maximum number of pages to process before stopping
+        device_details_batch_size: Number of IDs per device details hydration request
         pb: Proto types from zafran.proto_file
 
     Returns:
@@ -169,7 +182,7 @@ def collect_devices(auth, page_size, max_pages, pb):
             break
 
         log.info("Devices page %d: %d ids" % (page, len(ids)))
-        details = fetch_device_details(auth, ids)
+        details = fetch_device_details(auth, ids, device_details_batch_size)
         if type(details) != "list":
             log.error("Device details not list, skipping page: %s" % str(type(details)))
             break
@@ -222,13 +235,14 @@ def fetch_device_ids(auth, page_size, offset):
     return _as_list(resp.get("resources", [])), _extract_next_cursor(resp)
 
 
-def fetch_device_details(auth, ids):
+def fetch_device_details(auth, ids, batch_size):
     """
     Hydrate full device details for a list of device AIDs in batches.
 
     Args:
         auth: Auth dict with api_url, token, and retry settings
         ids: List of device AID strings to look up
+        batch_size: Number of IDs per request to device details endpoint
 
     Returns:
         List of raw device detail dicts from the API
@@ -237,7 +251,7 @@ def fetch_device_details(auth, ids):
         return []
     details = []
     string_ids = _as_string_list(ids)
-    for id_batch in _chunk_list(string_ids, DEVICE_DETAILS_BATCH_SIZE):
+    for id_batch in _chunk_list(string_ids, batch_size):
         ids_query = _build_ids_query(id_batch)
         url = "%s/devices/entities/devices/v2?%s" % (auth["api_url"], ids_query)
         resp = _authed_get(auth, url)

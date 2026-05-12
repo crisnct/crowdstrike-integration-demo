@@ -21,36 +21,35 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 - `vuln_filter` (optional): Explicit Spotlight FQL filter. Default is `status:'open'`.
 - `max_pages` (optional): Safety cap per collection loop (default `20`).
 - `max_retries` (optional): Max retries for `401` refresh and retryable statuses (`429`, `5xx`) (default `3`).
+- `device_details_batch_size` (optional): Number of device IDs per device-details request (default `100`).
 - `mock_mode` (optional): `true`/`false` toggle for offline mock collection (default `false`).
 
 ## Run Examples
-```bash 
+```bash
 # Mock mode (offline validation)
 ./starlark-runner-linux -script crowdstrike.star -params "mock_mode=true"
 
-# Linux 
-./starlark-runner-linux \ 
-  -script crowdstrike.star \ 
-  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,vuln_filter=status:'open'" \ 
+# Linux
+./starlark-runner-linux \
+  -script crowdstrike.star \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100,vuln_filter=status:'open'" \
   -output results.json \
   && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"
 
 # macOS
 ./starlark-runner-mac \
-  -script crowdstrike.star  \
-  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,vuln_filter=status:'open'" \
+  -script crowdstrike.star \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100,vuln_filter=status:'open'" \
   -output results.json \
-  && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"  
+  && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"
 
 ```
-## Notes
-- starlark-runner-linux and starlark-runner-mac can be downloaded from the Zafran public repo https://github.com/ZafranSecurity/zafran-custom-integrations-public/tree/main
 
 ## Behavior
 - Authenticates via OAuth2 `POST /oauth2/token`.
-- Refreshes token and retries on HTTP `401`; retries `429` and `5xx` up to `max_retries`.
+- For authenticated `GET` requests, refreshes token on `401` and retries retryable statuses (`429`, `5xx`) up to `max_retries`.
 - Paginates devices (`/devices/queries/devices/v1` + `/devices/entities/devices/v2`).
-  - Device details are requested with repeated `ids` query params (`ids=id1&ids=id2...`) and batched by 100 IDs/request.
+  - Device details are requested with repeated `ids` query params (`ids=id1&ids=id2...`) and batched by `device_details_batch_size` (default `100` IDs/request).
 - Paginates vulnerabilities (`/spotlight/combined/vulnerabilities/v1`) using CrowdStrike `after` continuation tokens.
 - Applies required Spotlight FQL filter (`status:'open'` by default, or `vuln_filter` when supplied).
 - Applies `max_pages` as a safety stop for both device and vulnerability loops.
@@ -72,6 +71,7 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 - Flushes once at completion to preserve instance/vulnerability association.
 
 ## Notes
+- `starlark-runner-linux` and `starlark-runner-mac` can be downloaded from the Zafran public repo: https://github.com/ZafranSecurity/zafran-custom-integrations-public/tree/main
 - Keep credentials secure; pass via runner params or env injection, not hard-coded.
 - If you see auth failures, verify client scopes and base URL for your CrowdStrike cloud.
 - Large environments: adjust `page_size` down if rate-limited, or up to reduce calls within limits.
