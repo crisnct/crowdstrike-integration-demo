@@ -24,25 +24,27 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 - `mock_mode` (optional): `true`/`false` toggle for offline mock collection (default `false`).
 
 ## Run Examples
-```bash
-# Linux (default open-vuln filter)
-./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200" -output results.json
-
-# macOS
-./starlark-runner-mac -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET" -output results.json
-
-# Linux with safety cap and retry tuning
-./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3" -output results.json
-
-# Linux with explicit vulnerability filter
-./starlark-runner-linux -script crowdstrike.star -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,vuln_filter=status:'open'" -output results.json
-
+```bash 
 # Mock mode (offline validation)
 ./starlark-runner-linux -script crowdstrike.star -params "mock_mode=true"
 
-# Save output to JSON
-./starlark-runner-linux -script crowdstrike.star -output results.json -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET" -output results.json
+# Linux 
+./starlark-runner-linux \ 
+  -script crowdstrike.star \ 
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,vuln_filter=status:'open'" \ 
+  -output results.json \
+  && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"
+
+# macOS
+./starlark-runner-mac \
+  -script crowdstrike.star  \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,vuln_filter=status:'open'" \
+  -output results.json \
+  && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"  
+
 ```
+## Notes
+- starlark-runner-linux and starlark-runner-mac can be downloaded from the Zafran public repo https://github.com/ZafranSecurity/zafran-custom-integrations-public/tree/main
 
 ## Behavior
 - Authenticates via OAuth2 `POST /oauth2/token`.

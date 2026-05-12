@@ -28,11 +28,10 @@ load("zafran", "zafran")
 # Defaults can be overridden via runner params
 DEFAULT_API_URL = "https://api.us-2.crowdstrike.com"
 DEFAULT_PAGE_SIZE = 100
-DEFAULT_MAX_PAGES = 20
+DEFAULT_MAX_PAGES = 10
 DEFAULT_MAX_RETRIES = 3
 DEVICE_DETAILS_BATCH_SIZE = 10
 REMEDIATION_DETAILS_BATCH_SIZE = 100
-
 
 def main(**kwargs):
     """
