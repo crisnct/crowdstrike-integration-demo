@@ -442,9 +442,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         pb: Proto types from zafran.proto_file
         known_instance_ids: Dict of AID -> True for devices collected in this run
     """
-    after_token = ""
-    page = 1
-    last_after_key = ""
+    traversal = _new_vuln_traversal_state()
     stats = _new_vulnerability_stats()
     remediation_cache = {}
     remediation_ids_seen = {}
@@ -454,68 +452,72 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
     log.info("Effective vulnerability filter: %s" % effective_filter)
 
     while True:
-        if page > max_pages:
-            stats["stop_reason"] = "reached_max_pages"
+        if traversal["page"] > max_pages:
+            _set_vuln_stop_reason(traversal, stats, "reached_max_pages")
             log.warn("Reached max_pages while collecting vulnerabilities: %d" % max_pages)
             break
 
-        vulns, next_after = fetch_vulnerabilities(auth, page_size, after_token, effective_filter)
+        vulns, next_after = fetch_vulnerabilities(auth, page_size, traversal["after_token"], effective_filter)
         if not vulns:
-            if page == 1:
-                stats["stop_reason"] = "no_vulnerabilities_first_page"
+            if traversal["page"] == 1:
+                _set_vuln_stop_reason(traversal, stats, "no_vulnerabilities_first_page")
                 log.info("No vulnerabilities returned")
             else:
-                stats["stop_reason"] = "no_more_vulnerabilities"
+                _set_vuln_stop_reason(traversal, stats, "no_more_vulnerabilities")
             break
 
         stats["pages_processed"] += 1
-        log.info("Vuln page %d: %d items" % (page, len(vulns)))
+        log.info("Vuln page %d: %d items" % (traversal["page"], len(vulns)))
 
         # Resolve remediation actions for this page (with run-level caching)
-        cache_hits, lookup_requests, actions_resolved = _hydrate_remediation_cache_for_page(
+        remediation_stats = _hydrate_remediation_cache_for_page(
             auth,
             vulns,
             remediation_cache,
             remediation_ids_seen,
         )
-        stats["remediation_cache_hits"] += cache_hits
-        stats["remediation_lookup_requests"] += lookup_requests
-        stats["remediation_actions_resolved"] += actions_resolved
 
         # Parse each vulnerability, filter by known instances, and collect
-        page_collected, page_skipped_missing_id, page_skipped_unknown_instance, page_used_cache, page_used_fallback = _collect_vulnerabilities_for_page(
+        page_collection_stats = _collect_vulnerabilities_for_page(
             vulns,
             pb,
             remediation_cache,
             known_instance_ids,
         )
-        stats["collected_count"] += page_collected
-        stats["skipped_missing_instance_id"] += page_skipped_missing_id
-        stats["skipped_unknown_instance"] += page_skipped_unknown_instance
-        stats["remediation_suggestion_from_api"] += page_used_cache
-        stats["remediation_suggestion_fallback"] += page_used_fallback
+        _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats)
 
-        log.info("Collected vulnerability page %d (%d vulns)" % (page, len(vulns)))
+        log.info("Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns)))
 
         # Advance pagination cursor or stop (see helper docstring for stop reasons).
-        should_continue, new_after_token, new_last_after_key, stop_reason = _advance_vulnerability_pagination(
+        should_continue, stop_reason = _advance_vuln_state(
+            traversal,
             next_after,
-            last_after_key,
             len(vulns),
             page_size,
         )
         if not should_continue:
-            stats["stop_reason"] = stop_reason
+            _set_vuln_stop_reason(traversal, stats, stop_reason)
             if stop_reason == "repeated_after_token":
                 log.warn("Vulnerability cursor repeated, stopping pagination")
             elif stop_reason == "missing_after_token":
                 log.warn("No after token returned with full page, stopping vulnerability pagination")
             break
-        after_token = new_after_token
-        last_after_key = new_last_after_key
-        page += 1
 
     _log_vulnerability_summary(stats, remediation_ids_seen)
+
+
+def _new_vuln_traversal_state():
+    return {
+        "page": 1,
+        "after_token": "",
+        "last_after_key": "",
+        "stop_reason": "completed",
+    }
+
+
+def _set_vuln_stop_reason(traversal, stats, stop_reason):
+    traversal["stop_reason"] = stop_reason
+    stats["stop_reason"] = stop_reason
 
 
 def _new_vulnerability_stats():
@@ -533,7 +535,32 @@ def _new_vulnerability_stats():
     }
 
 
+def _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats):
+    cache_hits, lookup_requests, actions_resolved = remediation_stats
+    stats["remediation_cache_hits"] += cache_hits
+    stats["remediation_lookup_requests"] += lookup_requests
+    stats["remediation_actions_resolved"] += actions_resolved
+
+    page_collected, page_skipped_missing_id, page_skipped_unknown_instance, page_used_cache, page_used_fallback = page_collection_stats
+    stats["collected_count"] += page_collected
+    stats["skipped_missing_instance_id"] += page_skipped_missing_id
+    stats["skipped_unknown_instance"] += page_skipped_unknown_instance
+    # Keep legacy "from_api" summary field name for compatibility with existing logs.
+    stats["remediation_suggestion_from_api"] += page_used_cache
+    stats["remediation_suggestion_fallback"] += page_used_fallback
+
+
 def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediation_ids_seen):
+    """
+    Resolve remediation actions for one vulnerability page and update cache state.
+
+    Side effects:
+      - updates `remediation_ids_seen` with page remediation IDs
+      - updates `remediation_cache` with fetched remediation actions
+
+    Returns:
+      Tuple of (cache_hits, lookup_requests, actions_resolved)
+    """
     page_remediation_ids = _collect_page_remediation_ids(vulns)
     missing_ids = []
     cache_hits = 0
@@ -559,10 +586,22 @@ def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediat
 
 
 def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instance_ids):
+    """
+    Parse and collect one page of vulnerabilities.
+
+    Returns:
+      Tuple of (
+        collected_count,
+        skipped_missing_instance_id,
+        skipped_unknown_instance,
+        remediation_suggestion_from_cache,
+        remediation_suggestion_fallback
+      )
+    """
     collected_count = 0
     skipped_missing_instance_id = 0
     skipped_unknown_instance = 0
-    remediation_suggestion_from_api = 0
+    remediation_suggestion_from_cache = 0
     remediation_suggestion_fallback = 0
 
     for raw_vuln in vulns:
@@ -579,7 +618,7 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
         zafran.collect_vulnerability(finding)
         collected_count += 1
         if used_cached_action:
-            remediation_suggestion_from_api += 1
+            remediation_suggestion_from_cache += 1
         else:
             remediation_suggestion_fallback += 1
 
@@ -587,9 +626,31 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
         collected_count,
         skipped_missing_instance_id,
         skipped_unknown_instance,
-        remediation_suggestion_from_api,
+        remediation_suggestion_from_cache,
         remediation_suggestion_fallback,
     )
+
+
+def _advance_vuln_state(traversal, next_after, page_count, page_size):
+    """
+    Advance traversal state for vulnerability pagination.
+
+    Returns:
+      Tuple of (should_continue, stop_reason)
+    """
+    should_continue, new_after_token, new_last_after_key, stop_reason = _advance_vulnerability_pagination(
+        next_after,
+        traversal["last_after_key"],
+        page_count,
+        page_size,
+    )
+    if not should_continue:
+        return False, stop_reason
+
+    traversal["after_token"] = new_after_token
+    traversal["last_after_key"] = new_last_after_key
+    traversal["page"] += 1
+    return True, ""
 
 
 def _advance_vulnerability_pagination(next_after, last_after_key, page_count, page_size):
