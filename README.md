@@ -55,12 +55,17 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 - Maps:
   - `InstanceData`: `instance_id`/identifier from AID, hostname, OS/platform, IPs, MAC, tags/groups to labels, domain/site/platform/product_type as key-value tags, type `INSTANCE_TYPE_MACHINE`.
   - `Vulnerability`: CVE, CVSS (score/vector), component (app/vendor/version), remediation suggestion, severity, links.
+    - Remediation suggestions are enriched from `GET /spotlight/entities/remediations/v2` using remediation IDs discovered in vulnerability payloads.
+    - ID priority: `apps[].remediation_info.recommended_id` -> `apps[].remediation_info.minimum_id` -> `apps[].remediation.ids[]`.
+    - If no remediation action is resolved from API, fallback mapping is used and finally defaults to `"No remediation guidance provided by CrowdStrike"`.
 - Collects vulnerabilities only when `instance_id` matches an instance collected in the current run.
 - Logs vulnerability summary counters:
   - pages processed
   - collected vulnerabilities
   - skipped findings with missing `instance_id`
   - skipped findings with unknown instance mapping
+  - remediation IDs discovered, lookup requests, cache hits, and resolved remediation actions
+  - suggestions sourced from remediations API action vs fallback
   - stop reason for traversal termination
 - Flushes once at completion to preserve instance/vulnerability association.
 

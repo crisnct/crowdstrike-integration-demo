@@ -9,7 +9,8 @@ DEFAULT_API_URL = "https://api.us-2.crowdstrike.com"
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 20
 DEFAULT_MAX_RETRIES = 3
-DEVICE_DETAILS_BATCH_SIZE = 100
+DEVICE_DETAILS_BATCH_SIZE = 10
+REMEDIATION_DETAILS_BATCH_SIZE = 100
 
 
 def main(**kwargs):
@@ -255,6 +256,13 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
     skipped_unknown_instance = 0
     pages_processed = 0
     stop_reason = "completed"
+    remediation_cache = {}
+    remediation_ids_seen = {}
+    remediation_lookup_requests = 0
+    remediation_cache_hits = 0
+    remediation_actions_resolved = 0
+    remediation_suggestion_from_api = 0
+    remediation_suggestion_fallback = 0
     effective_filter = _resolve_vuln_filter(vuln_filter)
     log.info("Effective vulnerability filter: %s" % effective_filter)
 
@@ -274,8 +282,28 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
         pages_processed += 1
         log.info("Vuln page %d: %d items" % (page, len(vulns)))
+
+        # Resolve remediation actions for this page with run-level caching.
+        page_remediation_ids = _collect_page_remediation_ids(vulns)
+        missing_ids = []
+        for rid in page_remediation_ids:
+            remediation_ids_seen[rid] = True
+            if rid in remediation_cache:
+                remediation_cache_hits += 1
+            else:
+                missing_ids.append(rid)
+
+        if len(missing_ids) > 0:
+            remediation_lookup_requests += len(missing_ids)
+            fetched_actions = fetch_remediation_actions(auth, missing_ids)
+            for rid in missing_ids:
+                action = fetched_actions.get(rid, "")
+                remediation_cache[rid] = action
+                if action:
+                    remediation_actions_resolved += 1
+
         for raw_vuln in vulns:
-            finding = parse_vulnerability(raw_vuln, pb)
+            finding, used_api_action = parse_vulnerability(raw_vuln, pb, remediation_cache)
             if finding:
                 # Skip vulnerabilities without a mapped instance in this run.
                 if not finding.instance_id:
@@ -286,6 +314,10 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
                     continue
                 zafran.collect_vulnerability(finding)
                 collected_count += 1
+                if used_api_action:
+                    remediation_suggestion_from_api += 1
+                else:
+                    remediation_suggestion_fallback += 1
 
         log.info("Collected vulnerability page %d (%d vulns)" % (page, len(vulns)))
 
@@ -306,8 +338,20 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         page += 1
 
     log.info(
-        "Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
-        % (pages_processed, collected_count, skipped_missing_instance_id, skipped_unknown_instance, stop_reason)
+        "Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, remediation_ids_discovered=%d, remediation_lookup_requests=%d, remediation_cache_hits=%d, remediation_actions_resolved=%d, remediation_suggestion_from_api=%d, remediation_suggestion_fallback=%d, stop_reason=%s"
+        % (
+            pages_processed,
+            collected_count,
+            skipped_missing_instance_id,
+            skipped_unknown_instance,
+            len(remediation_ids_seen),
+            remediation_lookup_requests,
+            remediation_cache_hits,
+            remediation_actions_resolved,
+            remediation_suggestion_from_api,
+            remediation_suggestion_fallback,
+            stop_reason,
+        )
     )
 
 
@@ -331,13 +375,36 @@ def fetch_vulnerabilities(auth, page_size, after_token, effective_filter):
     return _as_list(resp.get("resources", [])), _extract_after_cursor(resp)
 
 
-def parse_vulnerability(raw, pb):
+def fetch_remediation_actions(auth, remediation_ids):
+    action_by_id = {}
+    if len(remediation_ids) == 0:
+        return action_by_id
+
+    for id_batch in _chunk_list(remediation_ids, REMEDIATION_DETAILS_BATCH_SIZE):
+        query = _build_ids_query(id_batch)
+        url = "%s/spotlight/entities/remediations/v2?%s" % (auth["api_url"], query)
+        resp = _authed_get(auth, url)
+        if not resp or type(resp) != "dict":
+            continue
+        resources = _as_list(resp.get("resources", []))
+        for item in resources:
+            if type(item) != "dict":
+                continue
+            remediation_id = item.get("id", "")
+            action = item.get("action", "")
+            if type(remediation_id) == "string" and remediation_id and type(action) == "string" and action:
+                action_by_id[remediation_id] = action
+
+    return action_by_id
+
+
+def parse_vulnerability(raw, pb, remediation_cache):
     aid = raw.get("aid", "")
     cve_obj = raw.get("cve", {}) or {}
     cve = cve_obj.get("id") or raw.get("vulnerability_id", "")
     if not cve:
         log.warn("Vulnerability missing CVE/id, skipping")
-        return None
+        return None, False
 
     apps = _as_list(raw.get("apps", []))
     component = None
@@ -377,10 +444,16 @@ def parse_vulnerability(raw, pb):
     if len(rem_entities) > 0:
         remediation_obj = rem_entities[0]
 
+    priority_remediation_ids = _extract_priority_remediation_ids(raw)
+    remediation_action = _resolve_action_from_cache(priority_remediation_ids, remediation_cache)
+    used_api_action = remediation_action != ""
+    if remediation_action == "":
+        remediation_action = _resolve_remediation_suggestion(raw, remediation_obj)
+
     remediation = pb.Remediation(
-        suggestion=remediation_obj.get("action", "") or remediation_obj.get("title", ""),
+        suggestion=remediation_action,
         source="CrowdStrike",
-        fixed_in_version=remediation_obj.get("reference", ""),
+        fixed_in_version=_extract_fixed_in_version(remediation_obj),
     )
 
     severity = cve_obj.get("severity", "").lower()
@@ -402,7 +475,7 @@ def parse_vulnerability(raw, pb):
         references_url=_first_from_list(_as_list(cve_obj.get("references", []))),
     )
 
-    return finding
+    return finding, used_api_action
 
 
 # Helpers ------------------------------------------------------------------
@@ -521,6 +594,12 @@ def _as_list(value):
     return []
 
 
+def _as_string(value):
+    if type(value) == "string":
+        return value
+    return ""
+
+
 def _as_string_list(values):
     out = []
     for value in values:
@@ -532,19 +611,17 @@ def _as_string_list(values):
 
 
 def _chunk_list(values, chunk_size):
-    chunks = []
     if chunk_size <= 0:
-        return chunks
-    i = 0
-    size = len(values)
-    while i < size:
-        end = i + chunk_size
-        if end > size:
-            end = size
-        chunks.append(values[i:end])
-        i = end
-    return chunks
+        return []
 
+    chunks = []
+    i = 0
+
+    while i < len(values):
+        chunks.append(values[i:i + chunk_size])
+        i += chunk_size
+
+    return chunks
 
 def _extract_next_cursor(resp):
     meta = resp.get("meta", {})
@@ -637,6 +714,124 @@ def _first_from_list(arr):
     if not arr:
         return ""
     return arr[0]
+
+
+def _collect_page_remediation_ids(vulns):
+    seen = {}
+    ordered = []
+    for raw_vuln in vulns:
+        for rid in _extract_priority_remediation_ids(raw_vuln):
+            if rid and not seen.get(rid, False):
+                seen[rid] = True
+                ordered.append(rid)
+    return ordered
+
+
+def _extract_priority_remediation_ids(raw):
+    ordered = []
+    seen = {}
+    if type(raw) != "dict":
+        return ordered
+
+    apps = _as_list(raw.get("apps", []))
+    for app in apps:
+        if type(app) != "dict":
+            continue
+        remediation_info = app.get("remediation_info", {})
+        if type(remediation_info) == "dict":
+            for rid in [
+                _as_string(remediation_info.get("recommended_id", "")),
+                _as_string(remediation_info.get("minimum_id", "")),
+            ]:
+                if rid and not seen.get(rid, False):
+                    seen[rid] = True
+                    ordered.append(rid)
+
+        remediation_obj = app.get("remediation", {})
+        if type(remediation_obj) == "dict":
+            remediation_ids = _as_list(remediation_obj.get("ids", []))
+            for rid in remediation_ids:
+                rid_str = _as_string(rid)
+                if rid_str and not seen.get(rid_str, False):
+                    seen[rid_str] = True
+                    ordered.append(rid_str)
+
+    return ordered
+
+
+def _resolve_action_from_cache(priority_ids, remediation_cache):
+    for rid in priority_ids:
+        action = _as_string(remediation_cache.get(rid, ""))
+        if action:
+            return action
+    return ""
+
+
+def _resolve_remediation_suggestion(raw, remediation_obj):
+    suggestion = _as_string(remediation_obj.get("action", "")) or _as_string(remediation_obj.get("title", ""))
+    if suggestion:
+        return suggestion
+
+    remediation_info = raw.get("remediation_info", {})
+    if type(remediation_info) == "dict":
+        suggestion = (
+            _as_string(remediation_info.get("recommendation", ""))
+            or _as_string(remediation_info.get("action", ""))
+            or _as_string(remediation_info.get("title", ""))
+        )
+        if suggestion:
+            return suggestion
+
+    apps = _as_list(raw.get("apps", []))
+    if len(apps) > 0 and type(apps[0]) == "dict":
+        first_app = apps[0]
+        app_remediation_info = first_app.get("remediation_info", {})
+        suggestion = (
+            _as_string(first_app.get("remediation", ""))
+            or _as_string(first_app.get("recommendation", ""))
+            or _as_string(first_app.get("action", ""))
+            or _as_string(first_app.get("title", ""))
+        )
+        if suggestion:
+            return suggestion
+        if type(app_remediation_info) == "dict":
+            suggestion = (
+                _as_string(app_remediation_info.get("recommendation", ""))
+                or _as_string(app_remediation_info.get("action", ""))
+                or _as_string(app_remediation_info.get("title", ""))
+            )
+            if suggestion:
+                return suggestion
+
+    return "No remediation guidance provided by CrowdStrike"
+
+
+def _extract_fixed_in_version(remediation_obj):
+    ref = _as_string(remediation_obj.get("reference", ""))
+    if ref == "":
+        return ""
+
+    upper_ref = ref.upper()
+    if upper_ref.startswith("KB") or upper_ref.startswith("CVE-"):
+        return ""
+
+    without_digits = ref
+    without_digits = without_digits.replace("0", "")
+    without_digits = without_digits.replace("1", "")
+    without_digits = without_digits.replace("2", "")
+    without_digits = without_digits.replace("3", "")
+    without_digits = without_digits.replace("4", "")
+    without_digits = without_digits.replace("5", "")
+    without_digits = without_digits.replace("6", "")
+    without_digits = without_digits.replace("7", "")
+    without_digits = without_digits.replace("8", "")
+    without_digits = without_digits.replace("9", "")
+    has_digit = len(without_digits) != len(ref)
+    has_dot = len(ref.replace(".", "")) != len(ref)
+
+    if has_digit and has_dot:
+        return ref
+    return ""
 
 
 def _collect_mock_data(pb):
