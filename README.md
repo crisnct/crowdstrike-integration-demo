@@ -4,7 +4,7 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 
 ## Files
 - `crowdstrike.star` — integration script (authentication, asset pull, vulnerability pull, mapping, flushing).
-- `genericimport.proto` — reference types (sourced from Zafran public repo).
+- `genericimport.proto` reference (upstream source of truth): https://github.com/ZafranSecurity/zafran-custom-integrations-public/blob/main/genericimport.proto
 
 ## Prerequisites
 - CrowdStrike API client with scopes:
@@ -69,6 +69,22 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
   - suggestions sourced from remediations API action vs fallback
   - stop reason for traversal termination
 - Flushes once at completion to preserve instance/vulnerability association.
+
+## Validation Summary
+- Mock run (`mock_mode=true`): script executes successfully and collects 1 instance and 1 vulnerability.
+- Short live sample (`max_pages=1`): validates end-to-end API/auth flow and expected bounded traversal behavior.
+- Broader live sample (`max_pages>1`): validates multi-page pagination, remediation cache enrichment, and summary counters.
+
+## Design Choices
+- Safety-first traversal: `max_pages` caps both device and vulnerability loops to avoid runaway pagination.
+- Default vulnerability scope: uses `status:'open'` unless `vuln_filter` is explicitly provided.
+- Remediation enrichment: resolves remediation actions via remediations API with page-level discovery and run-level cache reuse.
+- Association integrity: vulnerabilities are collected only if `instance_id` maps to an instance collected in the same run.
+
+## Known Limitations
+- OAuth token exchange (`POST /oauth2/token`) is a single request path; retry/backoff logic is implemented for authenticated `GET` requests.
+- `max_pages` may truncate very large environments if set too low; tune based on expected tenant size.
+- Minimal URL encoding is used for query composition and assumes expected CrowdStrike ID/filter character sets.
 
 ## Notes
 - `starlark-runner-linux` and `starlark-runner-mac` can be downloaded from the Zafran public repo: https://github.com/ZafranSecurity/zafran-custom-integrations-public/tree/main
