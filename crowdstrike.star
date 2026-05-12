@@ -26,6 +26,7 @@ def main(**kwargs):
     - max_retries: Max retry attempts for retryable HTTP statuses (default 3)
     - vuln_filter: Optional explicit FQL filter for vulnerabilities (default status:'open')
     """
+    log.info("Step 0: Parsing configuration parameters...")
     api_url = kwargs.get("api_url", DEFAULT_API_URL).rstrip("/")
     client_id = kwargs.get("client_id", kwargs.get("api_key", ""))
     client_secret = kwargs.get("api_secret", "")
@@ -47,6 +48,7 @@ def main(**kwargs):
         log.info("Mock run complete")
         return None
 
+    log.info("Step 1: Validating credentials...")
     if not client_id or not client_secret:
         log.error("Missing client_id/api_key or api_secret")
         return None
@@ -59,25 +61,27 @@ def main(**kwargs):
         "max_retries": max_retries,
     }
 
-    if not mock_mode:
-        token = get_bearer_token(api_url, client_id, client_secret)
-        if not token:
-            log.error("Authentication failed, aborting run")
-            return None
-        auth["token"] = token
+    log.info("Step 2: Authenticating via OAuth2...")
+    token = get_bearer_token(api_url, client_id, client_secret)
+    if not token:
+        log.error("Authentication failed, aborting run")
+        return None
+    auth["token"] = token
+    log.info("Successfully obtained bearer token")
 
     log.info(
-        "Starting run: page_size=%d, max_pages=%d, max_retries=%d, mock_mode=%s"
-        % (page_size, max_pages, max_retries, str(mock_mode))
+        "Starting run: page_size=%d, max_pages=%d, max_retries=%d"
+        % (page_size, max_pages, max_retries)
     )
 
-    # Collect assets
+    log.info("Step 3: Collecting device assets...")
     instance_ids = collect_devices(auth, page_size, max_pages, pb)
+    log.info("Collected %d unique device instances" % len(instance_ids))
 
-    # Collect vulnerabilities (after instances to keep associations intact)
+    log.info("Step 4: Collecting vulnerabilities...")
     collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, instance_ids)
 
-    # Final flush in case any data remains
+    log.info("Step 5: Flushing remaining collected data...")
     zafran.flush()
     log.info("Run complete")
     return None
@@ -89,12 +93,14 @@ def get_bearer_token(api_url, client_id, client_secret):
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = "client_id=%s&client_secret=%s" % (client_id, client_secret)
 
+    # POST to OAuth2 token endpoint
     resp = http.post(token_url, headers=headers, body=payload)
     if resp["status_code"] != 201 and resp["status_code"] != 200:
         log.error("Token request failed: status=%d" % resp["status_code"])
         log.error("Body: %s" % resp.get("body", "")[:400])
         return ""
 
+    # Extract access_token from response
     data = json.decode(resp.get("body", "{}") or "{}")
     token = data.get("access_token", "")
     if not token:
@@ -112,6 +118,7 @@ def collect_devices(auth, page_size, max_pages, pb):
         if page > max_pages:
             log.warn("Reached max_pages while collecting devices: %d" % max_pages)
             break
+
         ids, next_offset = fetch_device_ids(auth, page_size, offset)
         if not ids:
             if page == 1:
@@ -123,6 +130,8 @@ def collect_devices(auth, page_size, max_pages, pb):
         if type(details) != "list":
             log.error("Device details not list, skipping page: %s" % str(type(details)))
             break
+
+        # Parse each device and collect as instance
         for raw_device in details:
             instance = parse_device(raw_device, pb)
             if instance:
@@ -131,6 +140,7 @@ def collect_devices(auth, page_size, max_pages, pb):
 
         log.info("Collected device page %d (%d devices)" % (page, len(details)))
 
+        # Advance pagination cursor or stop
         if next_offset:
             if str(next_offset) == last_offset_key:
                 log.warn("Device cursor repeated, stopping pagination")
@@ -182,17 +192,18 @@ def parse_device(raw, pb):
         log.warn("Device missing AID/device_id, skipping")
         return None
 
+    # Extract basic device attributes
     hostname = raw.get("hostname", "")
     platform = raw.get("platform_name", "")
     os_version = raw.get("os_version", "")
     mac = raw.get("mac_address", "")
 
+    # Collect and deduplicate IP addresses
     ips = []
     for key in ["local_ip", "external_ip"]:
         val = raw.get(key, "")
         if val:
             ips.append(val)
-    # Deduplicate IPs
     seen = {}
     unique_ips = []
     for ip in ips:
@@ -200,6 +211,7 @@ def parse_device(raw, pb):
             unique_ips.append(ip)
             seen[ip] = True
 
+    # Build labels from tags and groups
     labels = []
     for label in _as_list(raw.get("tags", [])):
         if label:
@@ -213,6 +225,7 @@ def parse_device(raw, pb):
         elif type(group) == "string" and group:
             labels.append(pb.InstanceLabel(label=group))
 
+    # Build key-value tags from domain, site, platform, product type
     key_value_tags = []
     for kv in [
         ("domain", raw.get("machine_domain", "")),
@@ -223,6 +236,7 @@ def parse_device(raw, pb):
         if kv[1]:
             key_value_tags.append(pb.InstanceTagKeyValue(key=kv[0], value=kv[1]))
 
+    # Build CrowdStrike AID identifier
     identifiers = [
         pb.InstanceIdentifier(
             key=pb.IdentifierType.CROWDSTRIKE_AID,
@@ -230,6 +244,7 @@ def parse_device(raw, pb):
         )
     ]
 
+    # Assemble and return InstanceData protobuf
     instance = pb.InstanceData(
         instance_id=aid,
         name=hostname or aid,
@@ -263,6 +278,8 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
     remediation_actions_resolved = 0
     remediation_suggestion_from_api = 0
     remediation_suggestion_fallback = 0
+
+    # Resolve effective FQL filter for Spotlight API
     effective_filter = _resolve_vuln_filter(vuln_filter)
     log.info("Effective vulnerability filter: %s" % effective_filter)
 
@@ -271,6 +288,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
             stop_reason = "reached_max_pages"
             log.warn("Reached max_pages while collecting vulnerabilities: %d" % max_pages)
             break
+
         vulns, next_after = fetch_vulnerabilities(auth, page_size, after_token, effective_filter)
         if not vulns:
             if page == 1:
@@ -283,7 +301,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         pages_processed += 1
         log.info("Vuln page %d: %d items" % (page, len(vulns)))
 
-        # Resolve remediation actions for this page with run-level caching.
+        # Resolve remediation actions for this page (with run-level caching)
         page_remediation_ids = _collect_page_remediation_ids(vulns)
         missing_ids = []
         for rid in page_remediation_ids:
@@ -302,10 +320,10 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
                 if action:
                     remediation_actions_resolved += 1
 
+        # Parse each vulnerability, filter by known instances, and collect
         for raw_vuln in vulns:
             finding, used_api_action = parse_vulnerability(raw_vuln, pb, remediation_cache)
             if finding:
-                # Skip vulnerabilities without a mapped instance in this run.
                 if not finding.instance_id:
                     skipped_missing_instance_id += 1
                     continue
@@ -321,6 +339,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
         log.info("Collected vulnerability page %d (%d vulns)" % (page, len(vulns)))
 
+        # Advance pagination cursor or stop
         if next_after:
             if str(next_after) == last_after_key:
                 stop_reason = "repeated_after_token"
@@ -386,6 +405,7 @@ def fetch_remediation_actions(auth, remediation_ids):
         resp = _authed_get(auth, url)
         if not resp or type(resp) != "dict":
             continue
+
         resources = _as_list(resp.get("resources", []))
         for item in resources:
             if type(item) != "dict":
@@ -399,6 +419,7 @@ def fetch_remediation_actions(auth, remediation_ids):
 
 
 def parse_vulnerability(raw, pb, remediation_cache):
+    # Extract and validate CVE identifier
     aid = raw.get("aid", "")
     cve_obj = raw.get("cve", {}) or {}
     cve = cve_obj.get("id") or raw.get("vulnerability_id", "")
@@ -406,6 +427,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
         log.warn("Vulnerability missing CVE/id, skipping")
         return None, False
 
+    # Build affected component from apps data
     apps = _as_list(raw.get("apps", []))
     component = None
     if len(apps) > 0:
@@ -425,6 +447,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
             version="",
         )
 
+    # Build CVSS scoring data
     cvss_list = []
     base_score = cve_obj.get("base_score") or raw.get("rating")
     vector = cve_obj.get("vector", "")
@@ -439,6 +462,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
             )
         )
 
+    # Resolve remediation action (prefer cached API action, fall back to inline suggestion)
     remediation_obj = {}
     rem_entities = _as_list((raw.get("remediation", {}) or {}).get("entities", []))
     if len(rem_entities) > 0:
@@ -450,6 +474,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
     if remediation_action == "":
         remediation_action = _resolve_remediation_suggestion(raw, remediation_obj)
 
+    # Build Remediation protobuf with suggestion and fixed version
     remediation = pb.Remediation(
         suggestion=remediation_action,
         source="CrowdStrike",
@@ -458,6 +483,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
 
     severity = cve_obj.get("severity", "").lower()
 
+    # Assemble and return Vulnerability protobuf
     finding = pb.Vulnerability(
         instance_id=aid,
         cve=cve,
@@ -498,6 +524,7 @@ def _authed_get(auth, url):
             attempt += 1
             continue
 
+        # Handle retryable status codes (429, 5xx) with backoff
         if _should_retry(status_code) and attempt < max_retries:
             attempt += 1
             _sleep_with_backoff(attempt)
@@ -509,6 +536,7 @@ def _authed_get(auth, url):
         log.error("GET failed: url=%s status=%d" % (url, resp["status_code"]))
         log.error("Body: %s" % (resp.get("body", "")[:400]))
         return None
+
     body = resp.get("body", "")
     if not body:
         return {}
@@ -537,21 +565,16 @@ def _to_int(value, default):
     s = value.strip()
     if s == "":
         return default
-    normalized = s
-    normalized = normalized.replace("0", "")
-    normalized = normalized.replace("1", "")
-    normalized = normalized.replace("2", "")
-    normalized = normalized.replace("3", "")
-    normalized = normalized.replace("4", "")
-    normalized = normalized.replace("5", "")
-    normalized = normalized.replace("6", "")
-    normalized = normalized.replace("7", "")
-    normalized = normalized.replace("8", "")
-    normalized = normalized.replace("9", "")
+    normalized = remove_digits(s)
     if normalized != "":
         return default
     return int(s)
 
+def remove_digits(value):
+    normalized = value
+    for digit in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
+            normalized = normalized.replace(digit, "")
+    return normalized
 
 def _to_float_or_none(value):
     if type(value) == "float":
@@ -565,16 +588,7 @@ def _to_float_or_none(value):
         return None
     normalized = s
     normalized = normalized.replace(".", "")
-    normalized = normalized.replace("0", "")
-    normalized = normalized.replace("1", "")
-    normalized = normalized.replace("2", "")
-    normalized = normalized.replace("3", "")
-    normalized = normalized.replace("4", "")
-    normalized = normalized.replace("5", "")
-    normalized = normalized.replace("6", "")
-    normalized = normalized.replace("7", "")
-    normalized = normalized.replace("8", "")
-    normalized = normalized.replace("9", "")
+    normalized = remove_digits(normalized)
     if normalized != "":
         return None
     return float(s)
@@ -737,6 +751,8 @@ def _extract_priority_remediation_ids(raw):
     for app in apps:
         if type(app) != "dict":
             continue
+
+        # Collect recommended and minimum remediation IDs from remediation_info
         remediation_info = app.get("remediation_info", {})
         if type(remediation_info) == "dict":
             for rid in [
@@ -747,6 +763,7 @@ def _extract_priority_remediation_ids(raw):
                     seen[rid] = True
                     ordered.append(rid)
 
+        # Collect additional remediation IDs from remediation.ids array
         remediation_obj = app.get("remediation", {})
         if type(remediation_obj) == "dict":
             remediation_ids = _as_list(remediation_obj.get("ids", []))
@@ -768,10 +785,12 @@ def _resolve_action_from_cache(priority_ids, remediation_cache):
 
 
 def _resolve_remediation_suggestion(raw, remediation_obj):
+    # Try remediation entity's action or title
     suggestion = _as_string(remediation_obj.get("action", "")) or _as_string(remediation_obj.get("title", ""))
     if suggestion:
         return suggestion
 
+    # Try top-level remediation_info fields
     remediation_info = raw.get("remediation_info", {})
     if type(remediation_info) == "dict":
         suggestion = (
@@ -782,6 +801,7 @@ def _resolve_remediation_suggestion(raw, remediation_obj):
         if suggestion:
             return suggestion
 
+    # Try first app's inline remediation fields and remediation_info
     apps = _as_list(raw.get("apps", []))
     if len(apps) > 0 and type(apps[0]) == "dict":
         first_app = apps[0]
@@ -807,25 +827,17 @@ def _resolve_remediation_suggestion(raw, remediation_obj):
 
 
 def _extract_fixed_in_version(remediation_obj):
+    # Extract reference field from remediation object
     ref = _as_string(remediation_obj.get("reference", ""))
     if ref == "":
         return ""
 
+    # Exclude KB articles and CVE identifiers (not version strings)
     upper_ref = ref.upper()
     if upper_ref.startswith("KB") or upper_ref.startswith("CVE-"):
         return ""
 
-    without_digits = ref
-    without_digits = without_digits.replace("0", "")
-    without_digits = without_digits.replace("1", "")
-    without_digits = without_digits.replace("2", "")
-    without_digits = without_digits.replace("3", "")
-    without_digits = without_digits.replace("4", "")
-    without_digits = without_digits.replace("5", "")
-    without_digits = without_digits.replace("6", "")
-    without_digits = without_digits.replace("7", "")
-    without_digits = without_digits.replace("8", "")
-    without_digits = without_digits.replace("9", "")
+    without_digits = remove_digits(ref)
     has_digit = len(without_digits) != len(ref)
     has_dot = len(ref.replace(".", "")) != len(ref)
 
