@@ -1,3 +1,24 @@
+# CrowdStrike Starlark integration script
+# Collects device assets and Spotlight vulnerabilities from the CrowdStrike
+# Falcon API and maps them to Zafran proto types.
+#
+# Structure:
+#   - main: Entry point that orchestrates the integration
+#   - get_bearer_token: Gets a bearer token from CrowdStrike OAuth2 endpoint
+#   - collect_devices: Paginates device IDs, hydrates details, collects instances
+#   - fetch_device_ids: Fetches a page of device AIDs
+#   - fetch_device_details: Hydrates device details in batches
+#   - parse_device: Transforms raw device data into InstanceData proto
+#   - collect_vulnerabilities: Paginates Spotlight vulns, resolves remediations, collects findings
+#   - fetch_vulnerabilities: Fetches a page of combined vulnerabilities
+#   - fetch_remediation_actions: Fetches remediation action text by ID
+#   - parse_vulnerability: Transforms raw vulnerability data into Vulnerability proto
+#
+# Data Collection:
+#   - Use zafran.collect_instance() and zafran.collect_vulnerability() to collect data
+#   - Use zafran.flush() to send collected data mid-execution (useful for large datasets)
+#   - Any unflushed data is automatically sent when the script completes
+
 load("http", "http")
 load("json", "json")
 load("log", "log")
@@ -28,6 +49,7 @@ def main(**kwargs):
     """
     log.info("Step 0: Parsing configuration parameters...")
     api_url = kwargs.get("api_url", DEFAULT_API_URL).rstrip("/")
+    log.info("Starting integration with API: %s" % api_url)
     client_id = kwargs.get("client_id", kwargs.get("api_key", ""))
     client_secret = kwargs.get("api_secret", "")
     page_size = _to_int(kwargs.get("page_size", "100"), DEFAULT_PAGE_SIZE)
@@ -83,12 +105,22 @@ def main(**kwargs):
 
     log.info("Step 5: Flushing remaining collected data...")
     zafran.flush()
-    log.info("Run complete")
+    log.info("Integration completed successfully")
     return None
 
 
 def get_bearer_token(api_url, client_id, client_secret):
-    """Client-credentials OAuth2 token exchange."""
+    """
+    Client-credentials OAuth2 token exchange.
+
+    Args:
+        api_url: CrowdStrike base URL
+        client_id: OAuth client ID
+        client_secret: OAuth client secret
+
+    Returns:
+        Bearer token string, or None if the exchange failed
+    """
     token_url = api_url + "/oauth2/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = "client_id=%s&client_secret=%s" % (client_id, client_secret)
@@ -98,18 +130,30 @@ def get_bearer_token(api_url, client_id, client_secret):
     if resp["status_code"] != 201 and resp["status_code"] != 200:
         log.error("Token request failed: status=%d" % resp["status_code"])
         log.error("Body: %s" % resp.get("body", "")[:400])
-        return ""
+        return None
 
     # Extract access_token from response
     data = json.decode(resp.get("body", "{}") or "{}")
     token = data.get("access_token", "")
     if not token:
         log.error("Token missing in response")
+        return None
     return token
 
 
 def collect_devices(auth, page_size, max_pages, pb):
-    """Fetch device IDs, hydrate details, map to InstanceData, and flush per page."""
+    """
+    Fetch device IDs, hydrate details, map to InstanceData, and collect per page.
+
+    Args:
+        auth: Auth dict with api_url, client_id, client_secret, token, max_retries
+        page_size: Number of device IDs to request per page
+        max_pages: Maximum number of pages to process before stopping
+        pb: Proto types from zafran.proto_file
+
+    Returns:
+        Dict of known instance IDs (AID -> True) collected during this run
+    """
     offset = 0
     page = 1
     known_ids = {}
@@ -159,6 +203,17 @@ def collect_devices(auth, page_size, max_pages, pb):
 
 
 def fetch_device_ids(auth, page_size, offset):
+    """
+    Fetch a page of device AIDs from the CrowdStrike devices query endpoint.
+
+    Args:
+        auth: Auth dict with api_url, token, and retry settings
+        page_size: Number of device IDs to request
+        offset: Pagination offset (int or cursor string)
+
+    Returns:
+        Tuple of (list of device ID strings, next pagination cursor)
+    """
     url = "%s/devices/queries/devices/v1?limit=%d&offset=%s" % (auth["api_url"], page_size, str(offset))
     resp = _authed_get(auth, url)
     if not resp:
@@ -169,6 +224,16 @@ def fetch_device_ids(auth, page_size, offset):
 
 
 def fetch_device_details(auth, ids):
+    """
+    Hydrate full device details for a list of device AIDs in batches.
+
+    Args:
+        auth: Auth dict with api_url, token, and retry settings
+        ids: List of device AID strings to look up
+
+    Returns:
+        List of raw device detail dicts from the API
+    """
     if not ids:
         return []
     details = []
@@ -187,6 +252,16 @@ def fetch_device_details(auth, ids):
 
 
 def parse_device(raw, pb):
+    """
+    Transform a raw CrowdStrike device dict into an InstanceData proto message.
+
+    Args:
+        raw: Raw device dict from the CrowdStrike devices API
+        pb: Proto types from zafran.proto_file
+
+    Returns:
+        InstanceData proto message, or None if the device is missing an AID
+    """
     aid = raw.get("device_id") or raw.get("aid") or ""
     if not aid:
         log.warn("Device missing AID/device_id, skipping")
@@ -263,6 +338,21 @@ def parse_device(raw, pb):
 
 
 def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_instance_ids):
+    """
+    Paginate Spotlight vulnerabilities, resolve remediation actions, and collect findings.
+
+    Vulnerabilities are filtered to only include those whose instance_id matches
+    a device collected in the current run. Remediation actions are fetched from
+    the remediations API and cached across pages.
+
+    Args:
+        auth: Auth dict with api_url, token, and retry settings
+        page_size: Number of vulnerabilities to request per page
+        max_pages: Maximum number of pages to process before stopping
+        vuln_filter: Optional explicit FQL filter string (defaults to status:'open')
+        pb: Proto types from zafran.proto_file
+        known_instance_ids: Dict of AID -> True for devices collected in this run
+    """
     after_token = ""
     page = 1
     last_after_key = ""
@@ -375,6 +465,18 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
 
 def fetch_vulnerabilities(auth, page_size, after_token, effective_filter):
+    """
+    Fetch a page of combined vulnerabilities from the CrowdStrike Spotlight API.
+
+    Args:
+        auth: Auth dict with api_url, token, and retry settings
+        page_size: Number of vulnerabilities to request
+        after_token: Cursor token for fetching the next page (empty string for first page)
+        effective_filter: FQL filter string for the Spotlight endpoint
+
+    Returns:
+        Tuple of (list of raw vulnerability dicts, next after cursor string)
+    """
     base = "%s/spotlight/combined/vulnerabilities/v1?limit=%d" % (
         auth["api_url"],
         page_size,
@@ -395,6 +497,16 @@ def fetch_vulnerabilities(auth, page_size, after_token, effective_filter):
 
 
 def fetch_remediation_actions(auth, remediation_ids):
+    """
+    Fetch remediation action text for a list of remediation IDs in batches.
+
+    Args:
+        auth: Auth dict with api_url, token, and retry settings
+        remediation_ids: List of remediation ID strings to look up
+
+    Returns:
+        Dict mapping remediation ID -> action text for IDs that resolved
+    """
     action_by_id = {}
     if len(remediation_ids) == 0:
         return action_by_id
@@ -419,6 +531,18 @@ def fetch_remediation_actions(auth, remediation_ids):
 
 
 def parse_vulnerability(raw, pb, remediation_cache):
+    """
+    Transform a raw CrowdStrike Spotlight vulnerability dict into a Vulnerability proto.
+
+    Args:
+        raw: Raw vulnerability dict from the Spotlight combined API
+        pb: Proto types from zafran.proto_file
+        remediation_cache: Dict of remediation ID -> action text for cached lookups
+
+    Returns:
+        Tuple of (Vulnerability proto, bool indicating if API remediation action was used),
+        or (None, False) if the vulnerability is missing a CVE identifier
+    """
     # Extract and validate CVE identifier
     aid = raw.get("aid", "")
     cve_obj = raw.get("cve", {}) or {}
@@ -507,6 +631,19 @@ def parse_vulnerability(raw, pb, remediation_cache):
 # Helpers ------------------------------------------------------------------
 
 def _authed_get(auth, url):
+    """
+    Perform an authenticated GET request with automatic token refresh and retry logic.
+
+    Handles 401 responses by refreshing the bearer token, and retries on 429/5xx
+    status codes with exponential backoff.
+
+    Args:
+        auth: Auth dict with api_url, client_id, client_secret, token, max_retries
+        url: Fully-qualified URL to GET
+
+    Returns:
+        Decoded JSON response as a dict, empty dict if body is empty, or None on failure
+    """
     max_retries = _to_int(auth.get("max_retries", DEFAULT_MAX_RETRIES), DEFAULT_MAX_RETRIES)
     attempt = 0
     while True:
@@ -742,6 +879,18 @@ def _collect_page_remediation_ids(vulns):
 
 
 def _extract_priority_remediation_ids(raw):
+    """
+    Extract ordered, deduplicated remediation IDs from a vulnerability's apps.
+
+    Prioritizes recommended_id and minimum_id from remediation_info, then
+    falls back to the remediation.ids array.
+
+    Args:
+        raw: Raw vulnerability dict from the Spotlight API
+
+    Returns:
+        List of unique remediation ID strings in priority order
+    """
     ordered = []
     seen = {}
     if type(raw) != "dict":
@@ -777,6 +926,16 @@ def _extract_priority_remediation_ids(raw):
 
 
 def _resolve_action_from_cache(priority_ids, remediation_cache):
+    """
+    Look up the first matching remediation action from the cache by priority order.
+
+    Args:
+        priority_ids: Ordered list of remediation ID strings to try
+        remediation_cache: Dict of remediation ID -> action text
+
+    Returns:
+        Action text string for the first hit, or empty string if none found
+    """
     for rid in priority_ids:
         action = _as_string(remediation_cache.get(rid, ""))
         if action:
@@ -785,6 +944,19 @@ def _resolve_action_from_cache(priority_ids, remediation_cache):
 
 
 def _resolve_remediation_suggestion(raw, remediation_obj):
+    """
+    Build a remediation suggestion string from inline vulnerability data.
+
+    Tries multiple locations in priority order: remediation entity action/title,
+    top-level remediation_info, then first app's remediation fields.
+
+    Args:
+        raw: Raw vulnerability dict from the Spotlight API
+        remediation_obj: First remediation entity dict (or empty dict)
+
+    Returns:
+        Remediation suggestion string, or a default message if none found
+    """
     # Try remediation entity's action or title
     suggestion = _as_string(remediation_obj.get("action", "")) or _as_string(remediation_obj.get("title", ""))
     if suggestion:
@@ -827,6 +999,18 @@ def _resolve_remediation_suggestion(raw, remediation_obj):
 
 
 def _extract_fixed_in_version(remediation_obj):
+    """
+    Extract a fixed-in version string from a remediation entity's reference field.
+
+    Filters out KB articles and CVE identifiers, and only returns references
+    that look like version strings (contain both digits and dots).
+
+    Args:
+        remediation_obj: Remediation entity dict (or empty dict)
+
+    Returns:
+        Version string, or empty string if not a valid version reference
+    """
     # Extract reference field from remediation object
     ref = _as_string(remediation_obj.get("reference", ""))
     if ref == "":
@@ -847,6 +1031,12 @@ def _extract_fixed_in_version(remediation_obj):
 
 
 def _collect_mock_data(pb):
+    """
+    Collect synthetic device and vulnerability data for offline testing.
+
+    Args:
+        pb: Proto types from zafran.proto_file
+    """
     instance = pb.InstanceData(
         instance_id="mock-aid-1",
         name="mock-host-1",
