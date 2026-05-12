@@ -369,18 +369,9 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
     after_token = ""
     page = 1
     last_after_key = ""
-    collected_count = 0
-    skipped_missing_instance_id = 0
-    skipped_unknown_instance = 0
-    pages_processed = 0
-    stop_reason = "completed"
+    stats = _new_vulnerability_stats()
     remediation_cache = {}
     remediation_ids_seen = {}
-    remediation_lookup_requests = 0
-    remediation_cache_hits = 0
-    remediation_actions_resolved = 0
-    remediation_suggestion_from_api = 0
-    remediation_suggestion_fallback = 0
 
     # Resolve effective FQL filter for Spotlight API
     effective_filter = _resolve_vuln_filter(vuln_filter)
@@ -388,91 +379,178 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
     while True:
         if page > max_pages:
-            stop_reason = "reached_max_pages"
+            stats["stop_reason"] = "reached_max_pages"
             log.warn("Reached max_pages while collecting vulnerabilities: %d" % max_pages)
             break
 
         vulns, next_after = fetch_vulnerabilities(auth, page_size, after_token, effective_filter)
         if not vulns:
             if page == 1:
-                stop_reason = "no_vulnerabilities_first_page"
+                stats["stop_reason"] = "no_vulnerabilities_first_page"
                 log.info("No vulnerabilities returned")
             else:
-                stop_reason = "no_more_vulnerabilities"
+                stats["stop_reason"] = "no_more_vulnerabilities"
             break
 
-        pages_processed += 1
+        stats["pages_processed"] += 1
         log.info("Vuln page %d: %d items" % (page, len(vulns)))
 
         # Resolve remediation actions for this page (with run-level caching)
-        page_remediation_ids = _collect_page_remediation_ids(vulns)
-        missing_ids = []
-        for rid in page_remediation_ids:
-            remediation_ids_seen[rid] = True
-            if rid in remediation_cache:
-                remediation_cache_hits += 1
-            else:
-                missing_ids.append(rid)
-
-        if len(missing_ids) > 0:
-            remediation_lookup_requests += len(missing_ids)
-            fetched_actions = fetch_remediation_actions(auth, missing_ids)
-            for rid in missing_ids:
-                action = fetched_actions.get(rid, "")
-                remediation_cache[rid] = action
-                if action:
-                    remediation_actions_resolved += 1
+        cache_hits, lookup_requests, actions_resolved = _hydrate_remediation_cache_for_page(
+            auth,
+            vulns,
+            remediation_cache,
+            remediation_ids_seen,
+        )
+        stats["remediation_cache_hits"] += cache_hits
+        stats["remediation_lookup_requests"] += lookup_requests
+        stats["remediation_actions_resolved"] += actions_resolved
 
         # Parse each vulnerability, filter by known instances, and collect
-        for raw_vuln in vulns:
-            finding, used_api_action = parse_vulnerability(raw_vuln, pb, remediation_cache)
-            if finding:
-                if not finding.instance_id:
-                    skipped_missing_instance_id += 1
-                    continue
-                if not known_instance_ids.get(finding.instance_id, False):
-                    skipped_unknown_instance += 1
-                    continue
-                zafran.collect_vulnerability(finding)
-                collected_count += 1
-                if used_api_action:
-                    remediation_suggestion_from_api += 1
-                else:
-                    remediation_suggestion_fallback += 1
+        page_collected, page_skipped_missing_id, page_skipped_unknown_instance, page_used_cache, page_used_fallback = _collect_vulnerabilities_for_page(
+            vulns,
+            pb,
+            remediation_cache,
+            known_instance_ids,
+        )
+        stats["collected_count"] += page_collected
+        stats["skipped_missing_instance_id"] += page_skipped_missing_id
+        stats["skipped_unknown_instance"] += page_skipped_unknown_instance
+        stats["remediation_suggestion_from_api"] += page_used_cache
+        stats["remediation_suggestion_fallback"] += page_used_fallback
 
         log.info("Collected vulnerability page %d (%d vulns)" % (page, len(vulns)))
 
         # Advance pagination cursor or stop
-        if next_after:
-            if str(next_after) == last_after_key:
-                stop_reason = "repeated_after_token"
+        should_continue, new_after_token, new_last_after_key, stop_reason = _advance_vulnerability_pagination(
+            next_after,
+            last_after_key,
+            len(vulns),
+            page_size,
+        )
+        if not should_continue:
+            stats["stop_reason"] = stop_reason
+            if stop_reason == "repeated_after_token":
                 log.warn("Vulnerability cursor repeated, stopping pagination")
-                break
-            last_after_key = str(next_after)
-            after_token = next_after
-        elif len(vulns) < page_size:
-            stop_reason = "short_page"
+            elif stop_reason == "missing_after_token":
+                log.warn("No after token returned with full page, stopping vulnerability pagination")
             break
-        else:
-            stop_reason = "missing_after_token"
-            log.warn("No after token returned with full page, stopping vulnerability pagination")
-            break
+        after_token = new_after_token
+        last_after_key = new_last_after_key
         page += 1
 
+    _log_vulnerability_summary(stats, remediation_ids_seen)
+
+
+def _new_vulnerability_stats():
+    return {
+        "pages_processed": 0,
+        "collected_count": 0,
+        "skipped_missing_instance_id": 0,
+        "skipped_unknown_instance": 0,
+        "remediation_lookup_requests": 0,
+        "remediation_cache_hits": 0,
+        "remediation_actions_resolved": 0,
+        "remediation_suggestion_from_api": 0,
+        "remediation_suggestion_fallback": 0,
+        "stop_reason": "completed",
+    }
+
+
+def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediation_ids_seen):
+    page_remediation_ids = _collect_page_remediation_ids(vulns)
+    missing_ids = []
+    cache_hits = 0
+
+    for rid in page_remediation_ids:
+        remediation_ids_seen[rid] = True
+        if rid in remediation_cache:
+            cache_hits += 1
+        else:
+            missing_ids.append(rid)
+
+    lookup_requests = len(missing_ids)
+    actions_resolved = 0
+    if lookup_requests > 0:
+        fetched_actions = fetch_remediation_actions(auth, missing_ids)
+        for rid in missing_ids:
+            action = fetched_actions.get(rid, "")
+            remediation_cache[rid] = action
+            if action:
+                actions_resolved += 1
+
+    return cache_hits, lookup_requests, actions_resolved
+
+
+def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instance_ids):
+    collected_count = 0
+    skipped_missing_instance_id = 0
+    skipped_unknown_instance = 0
+    remediation_suggestion_from_api = 0
+    remediation_suggestion_fallback = 0
+
+    for raw_vuln in vulns:
+        finding, used_cached_action = parse_vulnerability(raw_vuln, pb, remediation_cache)
+        if not finding:
+            continue
+        if not finding.instance_id:
+            skipped_missing_instance_id += 1
+            continue
+        if not known_instance_ids.get(finding.instance_id, False):
+            skipped_unknown_instance += 1
+            continue
+
+        zafran.collect_vulnerability(finding)
+        collected_count += 1
+        if used_cached_action:
+            remediation_suggestion_from_api += 1
+        else:
+            remediation_suggestion_fallback += 1
+
+    return (
+        collected_count,
+        skipped_missing_instance_id,
+        skipped_unknown_instance,
+        remediation_suggestion_from_api,
+        remediation_suggestion_fallback,
+    )
+
+
+def _advance_vulnerability_pagination(next_after, last_after_key, page_count, page_size):
+    if next_after:
+        if str(next_after) == last_after_key:
+            return False, "", last_after_key, "repeated_after_token"
+        return True, next_after, str(next_after), ""
+    if page_count < page_size:
+        return False, "", last_after_key, "short_page"
+    return False, "", last_after_key, "missing_after_token"
+
+
+def _log_vulnerability_summary(stats, remediation_ids_seen):
     log.info(
-        "Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, remediation_ids_discovered=%d, remediation_lookup_requests=%d, remediation_cache_hits=%d, remediation_actions_resolved=%d, remediation_suggestion_from_api=%d, remediation_suggestion_fallback=%d, stop_reason=%s"
+        "Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
         % (
-            pages_processed,
-            collected_count,
-            skipped_missing_instance_id,
-            skipped_unknown_instance,
+            stats["pages_processed"],
+            stats["collected_count"],
+            stats["skipped_missing_instance_id"],
+            stats["skipped_unknown_instance"],
+            stats["stop_reason"],
+        )
+    )
+    log.info(
+        "Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
+        % (
             len(remediation_ids_seen),
-            remediation_lookup_requests,
-            remediation_cache_hits,
-            remediation_actions_resolved,
-            remediation_suggestion_from_api,
-            remediation_suggestion_fallback,
-            stop_reason,
+            stats["remediation_lookup_requests"],
+            stats["remediation_cache_hits"],
+            stats["remediation_actions_resolved"],
+        )
+    )
+    log.info(
+        "Suggestion source summary: from_api=%d, fallback=%d"
+        % (
+            stats["remediation_suggestion_from_api"],
+            stats["remediation_suggestion_fallback"],
         )
     )
 
@@ -553,7 +631,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
         remediation_cache: Dict of remediation ID -> action text for cached lookups
 
     Returns:
-        Tuple of (Vulnerability proto, bool indicating if API remediation action was used),
+        Tuple of (Vulnerability proto, bool indicating if cached remediation action was used),
         or (None, False) if the vulnerability is missing a CVE identifier
     """
     # Extract and validate CVE identifier
@@ -607,7 +685,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
 
     priority_remediation_ids = _extract_priority_remediation_ids(raw)
     remediation_action = _resolve_action_from_cache(priority_remediation_ids, remediation_cache)
-    used_api_action = remediation_action != ""
+    used_cached_action = remediation_action != ""
     if remediation_action == "":
         remediation_action = _resolve_remediation_suggestion(raw, remediation_obj)
 
@@ -638,7 +716,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
         references_url=_first_from_list(_as_list(cve_obj.get("references", []))),
     )
 
-    return finding, used_api_action
+    return finding, used_cached_action
 
 
 # Helpers ------------------------------------------------------------------
@@ -715,15 +793,15 @@ def _to_int(value, default):
     s = value.strip()
     if s == "":
         return default
-    normalized = remove_digits(s)
+    normalized = _remove_digits(s)
     if normalized != "":
         return default
     return int(s)
 
-def remove_digits(value):
+def _remove_digits(value):
     normalized = value
     for digit in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
-            normalized = normalized.replace(digit, "")
+        normalized = normalized.replace(digit, "")
     return normalized
 
 def _to_float_or_none(value):
@@ -738,7 +816,7 @@ def _to_float_or_none(value):
         return None
     normalized = s
     normalized = normalized.replace(".", "")
-    normalized = remove_digits(normalized)
+    normalized = _remove_digits(normalized)
     if normalized != "":
         return None
     return float(s)
@@ -788,36 +866,29 @@ def _chunk_list(values, chunk_size):
     return chunks
 
 def _extract_next_cursor(resp):
-    meta = resp.get("meta", {})
-    if type(meta) != "dict":
-        return ""
-    pagination = meta.get("pagination", {})
-    if type(pagination) != "dict":
-        return ""
-    next_value = pagination.get("next", "")
-    if next_value == None:
-        return ""
-    if type(next_value) == "int":
-        return next_value
-    if type(next_value) == "string":
-        return next_value
-    return ""
+    return _extract_pagination_cursor(resp, "next", False)
 
 
 def _extract_after_cursor(resp):
+    return _extract_pagination_cursor(resp, "after", True)
+
+
+def _extract_pagination_cursor(resp, key, stringify_int):
     meta = resp.get("meta", {})
     if type(meta) != "dict":
         return ""
     pagination = meta.get("pagination", {})
     if type(pagination) != "dict":
         return ""
-    after_value = pagination.get("after", "")
-    if after_value == None:
+    cursor_value = pagination.get(key, "")
+    if cursor_value == None:
         return ""
-    if type(after_value) == "string":
-        return after_value
-    if type(after_value) == "int":
-        return str(after_value)
+    if type(cursor_value) == "string":
+        return cursor_value
+    if type(cursor_value) == "int":
+        if stringify_int:
+            return str(cursor_value)
+        return cursor_value
     return ""
 
 
@@ -1034,7 +1105,7 @@ def _extract_fixed_in_version(remediation_obj):
     if upper_ref.startswith("KB") or upper_ref.startswith("CVE-"):
         return ""
 
-    without_digits = remove_digits(ref)
+    without_digits = _remove_digits(ref)
     has_digit = len(without_digits) != len(ref)
     has_dot = len(ref.replace(".", "")) != len(ref)
 
