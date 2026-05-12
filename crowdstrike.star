@@ -32,6 +32,8 @@ DEFAULT_MAX_PAGES = 20
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_DEVICE_DETAILS_BATCH_SIZE = 100
 REMEDIATION_DETAILS_BATCH_SIZE = 100
+DEFAULT_VULN_FILTER = "status:'open'"
+DEFAULT_REMEDIATION_GUIDANCE = "No remediation guidance provided by CrowdStrike"
 
 def main(**kwargs):
     """
@@ -124,6 +126,9 @@ def get_bearer_token(api_url, client_id, client_secret):
     """
     Client-credentials OAuth2 token exchange.
 
+    This helper performs a single OAuth token request. Retry/backoff behavior
+    is intentionally implemented in `_authed_get` for authenticated GET calls.
+
     Args:
         api_url: CrowdStrike base URL
         client_id: OAuth client ID
@@ -196,7 +201,11 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
 
         log.info("Collected device page %d (%d devices)" % (page, len(details)))
 
-        # Advance pagination cursor or stop
+        # Advance pagination cursor or stop.
+        # Stop conditions:
+        #   - repeated cursor token (defensive loop break)
+        #   - short page (no more records)
+        #   - full page without next cursor (unsafe to continue)
         if next_offset:
             if str(next_offset) == last_offset_key:
                 log.warn("Device cursor repeated, stopping pagination")
@@ -421,7 +430,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
         log.info("Collected vulnerability page %d (%d vulns)" % (page, len(vulns)))
 
-        # Advance pagination cursor or stop
+        # Advance pagination cursor or stop (see helper docstring for stop reasons).
         should_continue, new_after_token, new_last_after_key, stop_reason = _advance_vulnerability_pagination(
             next_after,
             last_after_key,
@@ -517,6 +526,14 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
 
 
 def _advance_vulnerability_pagination(next_after, last_after_key, page_count, page_size):
+    """
+    Compute next pagination state for vulnerability traversal.
+
+    Stop reasons:
+      - repeated_after_token: service returned same cursor again
+      - short_page: current page has fewer records than requested
+      - missing_after_token: full page but no continuation token
+    """
     if next_after:
         if str(next_after) == last_after_key:
             return False, "", last_after_key, "repeated_after_token"
@@ -727,6 +744,8 @@ def _authed_get(auth, url):
 
     Handles 401 responses by refreshing the bearer token, and retries on 429/5xx
     status codes with exponential backoff.
+    This retry policy applies only to authenticated GET requests. The initial
+    OAuth token POST in `get_bearer_token` does not use this helper.
 
     Args:
         auth: Auth dict with api_url, client_id, client_secret, token, max_retries
@@ -782,7 +801,7 @@ def _resolve_vuln_filter(vuln_filter):
     """
     if type(vuln_filter) == "string" and vuln_filter:
         return vuln_filter
-    return "status:'open'"
+    return DEFAULT_VULN_FILTER
 
 
 def _to_int(value, default):
@@ -1079,7 +1098,7 @@ def _resolve_remediation_suggestion(raw, remediation_obj):
             if suggestion:
                 return suggestion
 
-    return "No remediation guidance provided by CrowdStrike"
+    return DEFAULT_REMEDIATION_GUIDANCE
 
 
 def _extract_fixed_in_version(remediation_obj):
