@@ -175,52 +175,119 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
     page = 1
     known_ids = {}
     last_offset_key = ""
+    stats = _new_device_collection_stats()
     while True:
         if page > max_pages:
+            stats["stop_reason"] = "reached_max_pages"
             log.warn("Reached max_pages while collecting devices: %d" % max_pages)
             break
 
         ids, next_offset = fetch_device_ids(auth, page_size, offset)
         if not ids:
             if page == 1:
+                stats["stop_reason"] = "no_devices_first_page"
                 log.info("No devices returned")
+            else:
+                stats["stop_reason"] = "no_more_devices"
             break
 
+        stats["pages_processed"] += 1
+        stats["ids_requested"] += len(ids)
         log.info("Devices page %d: %d ids" % (page, len(ids)))
-        details = fetch_device_details(auth, ids, device_details_batch_size)
-        if type(details) != "list":
-            log.error("Device details not list, skipping page: %s" % str(type(details)))
-            break
+        details_returned, instances_collected, instances_skipped = _collect_device_page_instances(
+            auth,
+            ids,
+            pb,
+            device_details_batch_size,
+            known_ids,
+        )
+        stats["details_returned"] += details_returned
+        stats["instances_collected"] += instances_collected
+        stats["instances_skipped"] += instances_skipped
 
-        # Parse each device and collect as instance
-        for raw_device in details:
-            instance = parse_device(raw_device, pb)
-            if instance:
-                zafran.collect_instance(instance)
-                known_ids[instance.instance_id] = True
+        log.info(
+            "Collected device page %d (details_returned=%d, instances_collected=%d, instances_skipped=%d)"
+            % (page, details_returned, instances_collected, instances_skipped)
+        )
 
-        log.info("Collected device page %d (%d devices)" % (page, len(details)))
-
-        # Advance pagination cursor or stop.
-        # Stop conditions:
-        #   - repeated cursor token (defensive loop break)
-        #   - short page (no more records)
-        #   - full page without next cursor (unsafe to continue)
-        if next_offset:
-            if str(next_offset) == last_offset_key:
+        should_continue, new_offset, new_last_offset_key, stop_reason = _advance_device_pagination(
+            next_offset,
+            last_offset_key,
+            len(ids),
+            page_size,
+            offset,
+        )
+        if not should_continue:
+            stats["stop_reason"] = stop_reason
+            if stop_reason == "repeated_next_offset":
                 log.warn("Device cursor repeated, stopping pagination")
-                break
-            last_offset_key = str(next_offset)
-            offset = next_offset
-        elif len(ids) < page_size:
-            break
-        else:
-            if type(offset) != "int":
+            elif stop_reason == "non_int_offset_without_cursor":
                 log.warn("Offset is non-int without next cursor, stopping device pagination")
-                break
-            offset += page_size
+            break
+
+        offset = new_offset
+        last_offset_key = new_last_offset_key
         page += 1
+
+    _log_device_collection_summary(stats, known_ids)
     return known_ids
+
+
+def _new_device_collection_stats():
+    return {
+        "pages_processed": 0,
+        "ids_requested": 0,
+        "details_returned": 0,
+        "instances_collected": 0,
+        "instances_skipped": 0,
+        "stop_reason": "completed",
+    }
+
+
+def _collect_device_page_instances(auth, ids, pb, device_details_batch_size, known_ids):
+    details = fetch_device_details(auth, ids, device_details_batch_size)
+    details_returned = len(details)
+    instances_collected = 0
+    instances_skipped = 0
+
+    for raw_device in details:
+        instance = parse_device(raw_device, pb)
+        if instance:
+            zafran.collect_instance(instance)
+            known_ids[instance.instance_id] = True
+            instances_collected += 1
+        else:
+            instances_skipped += 1
+
+    return details_returned, instances_collected, instances_skipped
+
+
+def _advance_device_pagination(next_offset, last_offset_key, ids_count, page_size, current_offset):
+    if next_offset:
+        next_offset_key = str(next_offset)
+        if next_offset_key == last_offset_key:
+            return False, current_offset, last_offset_key, "repeated_next_offset"
+        return True, next_offset, next_offset_key, ""
+    if ids_count < page_size:
+        return False, current_offset, last_offset_key, "short_page"
+    if type(current_offset) != "int":
+        return False, current_offset, last_offset_key, "non_int_offset_without_cursor"
+    return True, current_offset + page_size, last_offset_key, ""
+
+
+def _log_device_collection_summary(stats, known_ids):
+    log.info(
+        "Device summary: pages_processed=%d, ids_requested=%d, details_returned=%d, instances_collected=%d, instances_skipped=%d, unique_instances=%d, stop_reason=%s"
+        % (
+            stats["pages_processed"],
+            stats["ids_requested"],
+            stats["details_returned"],
+            stats["instances_collected"],
+            stats["instances_skipped"],
+            len(known_ids),
+            stats["stop_reason"],
+        )
+    )
 
 
 def fetch_device_ids(auth, page_size, offset):

@@ -32,14 +32,14 @@ This repo contains a Starlark script that pulls CrowdStrike devices and vulnerab
 # Linux
 ./starlark-runner-linux \
   -script crowdstrike.star \
-  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100,vuln_filter=status:'open'" \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100" \
   -output results.json \
   && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"
 
 # macOS
 ./starlark-runner-mac \
   -script crowdstrike.star \
-  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100,vuln_filter=status:'open'" \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100" \
   -output results.json \
   && python -c "import json, pathlib; p=pathlib.Path('results.json'); d=json.loads(p.read_text(encoding='utf-8')); p.write_text(json.dumps(d, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')"
 
