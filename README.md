@@ -37,7 +37,7 @@ Expected output: script succeeds and collects mock asset/vulnerability data.
 ```bash
 ./starlark-runner-linux \
   -script crowdstrike.star \
-  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100" \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=20,max_pages=5,max_retries=3,device_details_batch_size=100" \
   -output results.json
 ```
 
@@ -46,7 +46,7 @@ Expected output: script succeeds and collects mock asset/vulnerability data.
 ```bash
 ./starlark-runner-mac \
   -script crowdstrike.star \
-  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=200,max_pages=20,max_retries=3,device_details_batch_size=100" \
+  -params "api_url=https://api.us-2.crowdstrike.com,api_key=YOUR_ID,api_secret=YOUR_SECRET,page_size=20,max_pages=5,max_retries=3,device_details_batch_size=100" \
   -output results.json
 ```
 

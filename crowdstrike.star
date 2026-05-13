@@ -27,13 +27,36 @@ load("zafran", "zafran")
 
 # Defaults can be overridden via runner params
 DEFAULT_API_URL = "https://api.us-2.crowdstrike.com"
-DEFAULT_PAGE_SIZE = 100
-DEFAULT_MAX_PAGES = 20
+DEFAULT_PAGE_SIZE = 20
+DEFAULT_MAX_PAGES = 3
 DEFAULT_MAX_RETRIES = 3
-DEFAULT_DEVICE_DETAILS_BATCH_SIZE = 100
-REMEDIATION_DETAILS_BATCH_SIZE = 100
+DEFAULT_DEVICE_DETAILS_BATCH_SIZE = 20
+REMEDIATION_DETAILS_BATCH_SIZE = 20
 DEFAULT_VULN_FILTER = "status:'open'"
 DEFAULT_REMEDIATION_GUIDANCE = "No remediation guidance provided by CrowdStrike"
+CROWDSTRIKE_SOURCE = "CrowdStrike"
+LOG_BODY_PREVIEW_LEN = 400
+LOG_PREFIX_STEP = "❇️ "
+LOG_PREFIX_SUCCESS = "✅ "
+LOG_PREFIX_WARN = "⚠️ "
+LOG_PREFIX_ERROR = "❌ "
+LOG_PREFIX_DEVICE = "💻 "
+LOG_PREFIX_VULN = "🚨 "
+LOG_PREFIX_MOCK = "🧪 "
+LOG_PREFIX_SUMMARY = "🐞 "
+LOG_PREFIX_REMEDIATION = "🔫 "
+
+STOP_REASON_COMPLETED = "completed"
+STOP_REASON_REACHED_MAX_PAGES = "reached_max_pages"
+STOP_REASON_SHORT_PAGE = "short_page"
+STOP_REASON_NO_DEVICES_FIRST_PAGE = "no_devices_first_page"
+STOP_REASON_NO_MORE_DEVICES = "no_more_devices"
+STOP_REASON_REPEATED_NEXT_OFFSET = "repeated_next_offset"
+STOP_REASON_NON_INT_OFFSET_WITHOUT_CURSOR = "non_int_offset_without_cursor"
+STOP_REASON_NO_VULNERABILITIES_FIRST_PAGE = "no_vulnerabilities_first_page"
+STOP_REASON_NO_MORE_VULNERABILITIES = "no_more_vulnerabilities"
+STOP_REASON_REPEATED_AFTER_TOKEN = "repeated_after_token"
+STOP_REASON_MISSING_AFTER_TOKEN = "missing_after_token"
 
 def main(**kwargs):
     """
@@ -49,7 +72,7 @@ def main(**kwargs):
     - device_details_batch_size: Number of device IDs per details hydration request (default 100)
     - vuln_filter: Optional explicit FQL filter for vulnerabilities (default status:'open')
     """
-    log.info("❇️ Step 0: Parsing configuration parameters...")
+    log.info(LOG_PREFIX_STEP + "Step 0: Parsing configuration parameters...")
     api_url = kwargs.get("api_url", DEFAULT_API_URL).rstrip("/")
     client_id = kwargs.get("client_id", kwargs.get("api_key", ""))
     client_secret = kwargs.get("api_secret", "")
@@ -67,35 +90,36 @@ def main(**kwargs):
     log.info("Starting integration with API: %s" % api_url)
 
     if mock_mode:
-        log.info("🧪 Starting mock run: page_size=%d, max_pages=%d, max_retries=%d"
-            % (page_size, max_pages, max_retries)
+        log.info(
+            LOG_PREFIX_MOCK + ("Starting mock run: page_size=%d, max_pages=%d, max_retries=%d"
+            % (page_size, max_pages, max_retries))
         )
         _collect_mock_data(pb)
         zafran.flush()
-        log.info("🧪 Mock run complete")
+        log.info(LOG_PREFIX_MOCK + "Mock run complete")
         return None
 
-    log.info("❇️ Step 1: Validating the input parameters...")
+    log.info(LOG_PREFIX_STEP + "Step 1: Validating the input parameters...")
     if page_size <= 0:
-        log.warn("⚠️ Invalid page_size=%d; using default=%d" % (page_size, DEFAULT_PAGE_SIZE))
+        log.warn(LOG_PREFIX_WARN + ("Invalid page_size=%d; using default=%d" % (page_size, DEFAULT_PAGE_SIZE)))
         page_size = DEFAULT_PAGE_SIZE
     if max_pages <= 0:
-        log.warn("⚠️ Invalid max_pages=%d; using default=%d" % (max_pages, DEFAULT_MAX_PAGES))
+        log.warn(LOG_PREFIX_WARN + ("Invalid max_pages=%d; using default=%d" % (max_pages, DEFAULT_MAX_PAGES)))
         max_pages = DEFAULT_MAX_PAGES
     if max_retries <= 0:
-        log.warn("⚠️ Invalid max_retries=%d; using default=%d" % (max_retries, DEFAULT_MAX_RETRIES))
+        log.warn(LOG_PREFIX_WARN + ("Invalid max_retries=%d; using default=%d" % (max_retries, DEFAULT_MAX_RETRIES)))
         max_retries = DEFAULT_MAX_RETRIES
     if not client_id or not client_secret:
-        log.error("❌ Missing client_id/api_key or api_secret")
+        log.error(LOG_PREFIX_ERROR + "Missing client_id/api_key or api_secret")
         return None
     if device_details_batch_size <= 0:
         log.warn(
-            "⚠️ Invalid device_details_batch_size=%d; using default=%d"
-            % (device_details_batch_size, DEFAULT_DEVICE_DETAILS_BATCH_SIZE)
+            LOG_PREFIX_WARN + ("Invalid device_details_batch_size=%d; using default=%d"
+            % (device_details_batch_size, DEFAULT_DEVICE_DETAILS_BATCH_SIZE))
         )
         device_details_batch_size = DEFAULT_DEVICE_DETAILS_BATCH_SIZE
 
-    log.info("❇️ Step 2: Authenticating via OAuth2...")
+    log.info(LOG_PREFIX_STEP + "Step 2: Authenticating via OAuth2...")
     auth = {
         "api_url": api_url,
         "client_id": client_id,
@@ -105,7 +129,7 @@ def main(**kwargs):
     }
     token = get_bearer_token(api_url, client_id, client_secret)
     if not token:
-        log.error("❌ Authentication failed, aborting run")
+        log.error(LOG_PREFIX_ERROR + "Authentication failed, aborting run")
         return None
     auth["token"] = token
 
@@ -114,16 +138,16 @@ def main(**kwargs):
         % (page_size, max_pages, max_retries, device_details_batch_size)
     )
 
-    log.info("❇️ Step 3: Collecting device assets...")
+    log.info(LOG_PREFIX_STEP + "Step 3: Collecting device assets...")
     instance_ids = collect_devices(auth, page_size, max_pages, device_details_batch_size, pb)
 
-    log.info("❇️ Step 4: Collecting vulnerabilities...")
+    log.info(LOG_PREFIX_STEP + "Step 4: Collecting vulnerabilities...")
     collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, instance_ids)
 
-    log.info("❇️ Step 5: Flushing remaining collected data...")
+    log.info(LOG_PREFIX_STEP + "Step 5: Flushing remaining collected data...")
     zafran.flush()
 
-    log.info("✅️ Data extracted successfully from CrowdStrike and collected into Zafran")
+    log.info(LOG_PREFIX_SUCCESS + "Data extracted successfully from CrowdStrike and collected into Zafran")
     return None
 
 
@@ -152,17 +176,17 @@ def get_bearer_token(api_url, client_id, client_secret):
     # POST to OAuth2 token endpoint
     resp = http.post(token_url, headers=headers, body=payload)
     if resp["status_code"] != 201 and resp["status_code"] != 200:
-        log.error("❌ Token request failed: status=%d" % resp["status_code"])
-        log.error("❌ Body: %s" % resp.get("body", "")[:400])
+        log.error(LOG_PREFIX_ERROR + ("Token request failed: status=%d" % resp["status_code"]))
+        log.error(LOG_PREFIX_ERROR + ("Body: %s" % resp.get("body", "")[:LOG_BODY_PREVIEW_LEN]))
         return None
 
     # Extract access_token from response
     data = json.decode(resp.get("body", "{}") or "{}")
     token = data.get("access_token", "")
     if not token:
-        log.error("❌ Token missing in response")
+        log.error(LOG_PREFIX_ERROR + "Token missing in response")
         return None
-    log.info("✅ Successfully obtained bearer token")
+    log.info(LOG_PREFIX_SUCCESS + "Successfully obtained bearer token")
     return token
 
 
@@ -187,22 +211,22 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
     stats = _new_device_collection_stats()
     while True:
         if page > max_pages:
-            stats["stop_reason"] = "reached_max_pages"
-            log.warn("⚠️ Reached max_pages while collecting devices: %d" % max_pages)
+            stats["stop_reason"] = STOP_REASON_REACHED_MAX_PAGES
+            log.warn(LOG_PREFIX_WARN + ("Reached max_pages while collecting devices: %d" % max_pages))
             break
 
         ids, next_offset = fetch_device_ids(auth, page_size, offset)
         if not ids:
             if page == 1:
-                stats["stop_reason"] = "no_devices_first_page"
-                log.info("💻 No devices returned")
+                stats["stop_reason"] = STOP_REASON_NO_DEVICES_FIRST_PAGE
+                log.info(LOG_PREFIX_DEVICE + "No devices returned")
             else:
-                stats["stop_reason"] = "no_more_devices"
+                stats["stop_reason"] = STOP_REASON_NO_MORE_DEVICES
             break
 
         stats["pages_processed"] += 1
         stats["ids_requested"] += len(ids)
-        log.info("💻 Devices page %d: %d ids" % (page, len(ids)))
+        log.info(LOG_PREFIX_DEVICE + ("Devices page %d: %d ids" % (page, len(ids))))
         details_returned, instances_collected, instances_skipped = _collect_device_page_instances(
             auth,
             ids,
@@ -215,8 +239,8 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
         stats["instances_skipped"] += instances_skipped
 
         log.info(
-            "💻 Collected device page %d (details_returned=%d, instances_collected=%d, instances_skipped=%d)"
-            % (page, details_returned, instances_collected, instances_skipped)
+            LOG_PREFIX_DEVICE + ("Collected device page %d (details_returned=%d, instances_collected=%d, instances_skipped=%d)"
+            % (page, details_returned, instances_collected, instances_skipped))
         )
 
         should_continue, new_offset, new_last_offset_key, stop_reason = _advance_device_pagination(
@@ -228,10 +252,10 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
         )
         if not should_continue:
             stats["stop_reason"] = stop_reason
-            if stop_reason == "repeated_next_offset":
-                log.warn("⚠️ Device cursor repeated, stopping pagination")
-            elif stop_reason == "non_int_offset_without_cursor":
-                log.warn("⚠️ Offset is non-int without next cursor, stopping device pagination")
+            if stop_reason == STOP_REASON_REPEATED_NEXT_OFFSET:
+                log.warn(LOG_PREFIX_WARN + "Device cursor repeated, stopping pagination")
+            elif stop_reason == STOP_REASON_NON_INT_OFFSET_WITHOUT_CURSOR:
+                log.warn(LOG_PREFIX_WARN + "Offset is non-int without next cursor, stopping device pagination")
             break
 
         offset = new_offset
@@ -239,7 +263,7 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
         page += 1
 
     _log_device_collection_summary(stats, known_ids)
-    log.info("💻 Collected %d unique device instances" % len(known_ids))
+    log.info(LOG_PREFIX_DEVICE + ("Collected %d unique device instances" % len(known_ids)))
     return known_ids
 
 
@@ -250,7 +274,7 @@ def _new_device_collection_stats():
         "details_returned": 0,
         "instances_collected": 0,
         "instances_skipped": 0,
-        "stop_reason": "completed",
+        "stop_reason": STOP_REASON_COMPLETED,
     }
 
 
@@ -276,18 +300,18 @@ def _advance_device_pagination(next_offset, last_offset_key, ids_count, page_siz
     if next_offset:
         next_offset_key = str(next_offset)
         if next_offset_key == last_offset_key:
-            return False, current_offset, last_offset_key, "repeated_next_offset"
+            return False, current_offset, last_offset_key, STOP_REASON_REPEATED_NEXT_OFFSET
         return True, next_offset, next_offset_key, ""
     if ids_count < page_size:
-        return False, current_offset, last_offset_key, "short_page"
+        return False, current_offset, last_offset_key, STOP_REASON_SHORT_PAGE
     if type(current_offset) != "int":
-        return False, current_offset, last_offset_key, "non_int_offset_without_cursor"
+        return False, current_offset, last_offset_key, STOP_REASON_NON_INT_OFFSET_WITHOUT_CURSOR
     return True, current_offset + page_size, last_offset_key, ""
 
 
 def _log_device_collection_summary(stats, known_ids):
     log.info(
-        "💻 Device summary: pages_processed=%d, ids_requested=%d, details_returned=%d, instances_collected=%d, instances_skipped=%d, unique_instances=%d, stop_reason=%s"
+        LOG_PREFIX_DEVICE + ("Device summary: pages_processed=%d, ids_requested=%d, details_returned=%d, instances_collected=%d, instances_skipped=%d, unique_instances=%d, stop_reason=%s"
         % (
             stats["pages_processed"],
             stats["ids_requested"],
@@ -296,7 +320,7 @@ def _log_device_collection_summary(stats, known_ids):
             stats["instances_skipped"],
             len(known_ids),
             stats["stop_reason"],
-        )
+        ))
     )
 
 
@@ -363,7 +387,7 @@ def parse_device(raw, pb):
     """
     aid = raw.get("device_id") or raw.get("aid") or ""
     if not aid:
-        log.warn("⚠️ Device missing AID/device_id, skipping")
+        log.warn(LOG_PREFIX_WARN + "Device missing AID/device_id, skipping")
         return None
 
     # Extract basic device attributes
@@ -459,25 +483,25 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
     # Resolve effective FQL filter for Spotlight API
     effective_filter = _resolve_vuln_filter(vuln_filter)
-    log.info("🚨️ Effective vulnerability filter: %s" % effective_filter)
+    log.info(LOG_PREFIX_VULN + ("Effective vulnerability filter: %s" % effective_filter))
 
     while True:
         if traversal["page"] > max_pages:
-            _set_vuln_stop_reason(stats, "reached_max_pages")
-            log.warn("⚠️ Reached max_pages while collecting vulnerabilities: %d" % max_pages)
+            _set_vuln_stop_reason(stats, STOP_REASON_REACHED_MAX_PAGES)
+            log.warn(LOG_PREFIX_WARN + ("Reached max_pages while collecting vulnerabilities: %d" % max_pages))
             break
 
         vulns, next_after = fetch_vulnerabilities(auth, page_size, traversal["after_token"], effective_filter)
         if not vulns:
             if traversal["page"] == 1:
-                _set_vuln_stop_reason(stats, "no_vulnerabilities_first_page")
+                _set_vuln_stop_reason(stats, STOP_REASON_NO_VULNERABILITIES_FIRST_PAGE)
                 log.info("No vulnerabilities returned")
             else:
-                _set_vuln_stop_reason(stats, "no_more_vulnerabilities")
+                _set_vuln_stop_reason(stats, STOP_REASON_NO_MORE_VULNERABILITIES)
             break
 
         stats["pages_processed"] += 1
-        log.info("🚨️ Vuln page %d: %d items" % (traversal["page"], len(vulns)))
+        log.info(LOG_PREFIX_VULN + ("Vuln page %d: %d items" % (traversal["page"], len(vulns))))
 
         # Resolve remediation actions for this page (with run-level caching)
         remediation_stats = _hydrate_remediation_cache_for_page(
@@ -495,8 +519,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
             known_instance_ids,
         )
         _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats)
-
-        log.info("🚨 Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns)))
+        log.info(LOG_PREFIX_VULN + ("Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns))))
 
         # Advance pagination cursor or stop (see helper docstring for stop reasons).
         should_continue, stop_reason = _advance_vuln_state(
@@ -507,10 +530,10 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         )
         if not should_continue:
             _set_vuln_stop_reason(stats, stop_reason)
-            if stop_reason == "repeated_after_token":
-                log.warn("⚠️ Vulnerability cursor repeated, stopping pagination")
-            elif stop_reason == "missing_after_token":
-                log.warn("⚠️ No after token returned with full page, stopping vulnerability pagination")
+            if stop_reason == STOP_REASON_REPEATED_AFTER_TOKEN:
+                log.warn(LOG_PREFIX_WARN + "Vulnerability cursor repeated, stopping pagination")
+            elif stop_reason == STOP_REASON_MISSING_AFTER_TOKEN:
+                log.warn(LOG_PREFIX_WARN + "No after token returned with full page, stopping vulnerability pagination")
             break
 
     _log_vulnerability_summary(stats, remediation_ids_seen)
@@ -537,9 +560,7 @@ def _new_vulnerability_stats():
         "remediation_lookup_requests": 0,
         "remediation_cache_hits": 0,
         "remediation_actions_resolved": 0,
-        "remediation_suggestion_cached_action": 0,
-        "remediation_suggestion_inline_fallback": 0,
-        "stop_reason": "completed",
+        "stop_reason": STOP_REASON_COMPLETED,
     }
 
 
@@ -552,8 +573,6 @@ def _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats
     stats["collected_count"] += page_collection_stats.get("collected_count", 0)
     stats["skipped_missing_instance_id"] += page_collection_stats.get("skipped_missing_instance_id", 0)
     stats["skipped_unknown_instance"] += page_collection_stats.get("skipped_unknown_instance", 0)
-    stats["remediation_suggestion_cached_action"] += page_collection_stats.get("remediation_suggestion_cached_action", 0)
-    stats["remediation_suggestion_inline_fallback"] += page_collection_stats.get("remediation_suggestion_inline_fallback", 0)
 
 
 def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediation_ids_seen):
@@ -607,17 +626,13 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
       - collected_count
       - skipped_missing_instance_id
       - skipped_unknown_instance
-      - remediation_suggestion_cached_action
-      - remediation_suggestion_inline_fallback
     """
     collected_count = 0
     skipped_missing_instance_id = 0
     skipped_unknown_instance = 0
-    remediation_suggestion_cached_action = 0
-    remediation_suggestion_inline_fallback = 0
 
     for raw_vuln in vulns:
-        finding, used_cached_action = parse_vulnerability(raw_vuln, pb, remediation_cache)
+        finding = parse_vulnerability(raw_vuln, pb, remediation_cache)
         if not finding:
             continue
         if not finding.instance_id:
@@ -629,17 +644,11 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
 
         zafran.collect_vulnerability(finding)
         collected_count += 1
-        if used_cached_action:
-            remediation_suggestion_cached_action += 1
-        else:
-            remediation_suggestion_inline_fallback += 1
 
     return {
         "collected_count": collected_count,
         "skipped_missing_instance_id": skipped_missing_instance_id,
-        "skipped_unknown_instance": skipped_unknown_instance,
-        "remediation_suggestion_cached_action": remediation_suggestion_cached_action,
-        "remediation_suggestion_inline_fallback": remediation_suggestion_inline_fallback,
+        "skipped_unknown_instance": skipped_unknown_instance
     }
 
 
@@ -676,38 +685,32 @@ def _advance_vulnerability_pagination(next_after, last_after_key, page_count, pa
     """
     if next_after:
         if str(next_after) == last_after_key:
-            return False, "", last_after_key, "repeated_after_token"
+            return False, "", last_after_key, STOP_REASON_REPEATED_AFTER_TOKEN
         return True, next_after, str(next_after), ""
     if page_count < page_size:
-        return False, "", last_after_key, "short_page"
-    return False, "", last_after_key, "missing_after_token"
+        return False, "", last_after_key, STOP_REASON_SHORT_PAGE
+    return False, "", last_after_key, STOP_REASON_MISSING_AFTER_TOKEN
 
 
 def _log_vulnerability_summary(stats, remediation_ids_seen):
     log.info(
-        "🐞 Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
+        LOG_PREFIX_SUMMARY + ("Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
         % (
             stats["pages_processed"],
             stats["collected_count"],
             stats["skipped_missing_instance_id"],
             stats["skipped_unknown_instance"],
             stats["stop_reason"],
-        )
+        ))
     )
     log.info(
-        "🔫️️ Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
+        LOG_PREFIX_REMEDIATION + ("Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
         % (
             len(remediation_ids_seen),
             stats["remediation_lookup_requests"],
             stats["remediation_cache_hits"],
             stats["remediation_actions_resolved"],
-        )
-    )
-    log.info("️🔫️ Suggestion source summary: cached_action=%d, inline_fallback=%d"
-        % (
-            stats["remediation_suggestion_cached_action"],
-            stats["remediation_suggestion_inline_fallback"],
-        )
+        ))
     )
 
 
@@ -795,7 +798,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
     cve_obj = raw.get("cve", {}) or {}
     cve = cve_obj.get("id") or raw.get("vulnerability_id", "")
     if not cve:
-        log.warn("⚠️ Vulnerability missing CVE/id, skipping")
+        log.warn(LOG_PREFIX_WARN + "Vulnerability missing CVE/id, skipping")
         return None, False
 
     # Build affected component from apps data
@@ -829,24 +832,17 @@ def parse_vulnerability(raw, pb, remediation_cache):
                 base_score=parsed_score,
                 vector=vector,
                 version="3.1",
-                source="crowdstrike",
+                source=CROWDSTRIKE_SOURCE,
             )
         )
 
-    # Resolve remediation action (prefer cached API action, fall back to inline suggestion)
-    remediation_obj = _first_remediation_entity(raw)
-
     primary_remediation_id = _resolve_primary_remediation_id(raw)
     remediation_action = _resolve_action_from_cache(primary_remediation_id, remediation_cache)
-    used_cached_action = remediation_action != ""
-    if remediation_action == "":
-        remediation_action = _resolve_remediation_suggestion(raw, remediation_obj)
 
     # Build Remediation protobuf with suggestion and fixed version
     remediation = pb.Remediation(
         suggestion=remediation_action,
-        source="CrowdStrike",
-        fixed_in_version=_extract_fixed_in_version(remediation_obj),
+        source=CROWDSTRIKE_SOURCE
     )
 
     severity = _as_string(cve_obj.get("severity", "")).lower()
@@ -862,14 +858,10 @@ def parse_vulnerability(raw, pb, remediation_cache):
         description=cve_obj.get("description", "") or raw.get("status", ""),
         severity=severity,
         scanner_id=raw.get("scanner_id", ""),
-        external_url=_first_non_empty(
-            remediation_obj.get("link", ""),
-            remediation_obj.get("vendor_url", ""),
-        ),
         references_url=_first_from_list(_as_list(cve_obj.get("references", []))),
     )
 
-    return finding, used_cached_action
+    return finding
 
 
 # Helpers ------------------------------------------------------------------
@@ -898,10 +890,10 @@ def _authed_get(auth, url):
         status_code = resp["status_code"]
 
         if status_code == 401 and attempt < max_retries:
-            log.info("❌ 401 received; refreshing bearer token and retrying")
+            log.info(LOG_PREFIX_ERROR + "401 received; refreshing bearer token and retrying")
             refreshed = get_bearer_token(auth["api_url"], auth["client_id"], auth["client_secret"])
             if not refreshed:
-                log.error("❌ Token refresh failed")
+                log.error(LOG_PREFIX_ERROR + "Token refresh failed")
                 return None
             auth["token"] = refreshed
             attempt += 1
@@ -911,13 +903,13 @@ def _authed_get(auth, url):
         if _should_retry(status_code) and attempt < max_retries:
             attempt += 1
             _sleep_with_backoff(attempt)
-            log.warn("⚠️ Retrying HTTP request: status=%d attempt=%d/%d" % (status_code, attempt, max_retries))
+            log.warn(LOG_PREFIX_WARN + ("Retrying HTTP request: status=%d attempt=%d/%d" % (status_code, attempt, max_retries)))
             continue
         break
 
     if resp["status_code"] != 200:
-        log.error("❌ GET failed: url=%s status=%d" % (url, resp["status_code"]))
-        log.error("❌ Body: %s" % (resp.get("body", "")[:400]))
+        log.error(LOG_PREFIX_ERROR + ("GET failed: url=%s status=%d" % (url, resp["status_code"])))
+        log.error(LOG_PREFIX_ERROR + ("Body: %s" % (resp.get("body", "")[:LOG_BODY_PREVIEW_LEN])))
         return None
 
     body = resp.get("body", "")
@@ -925,7 +917,7 @@ def _authed_get(auth, url):
         return {}
     decoded = json.decode(body)
     if type(decoded) == "string":
-        log.error("❌ Decoded body is string, expected object/array: %s" % decoded[:200])
+        log.error(LOG_PREFIX_ERROR + ("Decoded body is string, expected object/array: %s" % decoded[:200]))
         return {}
     return decoded
 
@@ -1255,95 +1247,9 @@ def _resolve_action_from_cache(remediation_id, remediation_cache):
         Action text string, or empty string when not found
     """
     if not remediation_id:
-        return ""
+        return DEFAULT_REMEDIATION_GUIDANCE
     return _as_string(remediation_cache.get(remediation_id, ""))
 
-
-def _resolve_remediation_suggestion(raw, remediation_obj):
-    """
-    Build a remediation suggestion string from inline vulnerability data.
-
-    Tries multiple locations in priority order: remediation entity action/title,
-    top-level remediation_info, then first app's remediation fields.
-
-    Args:
-        raw: Raw vulnerability dict from the Spotlight API
-        remediation_obj: First remediation entity dict (or empty dict)
-
-    Returns:
-        Remediation suggestion string, or a default message if none found
-    """
-    # Try remediation entity's action or title
-    suggestion = _as_string(remediation_obj.get("action", "")) or _as_string(remediation_obj.get("title", ""))
-    if suggestion:
-        return suggestion
-
-    # Try top-level remediation_info fields
-    remediation_info = raw.get("remediation_info", {})
-    if type(remediation_info) == "dict":
-        suggestion = (
-            _as_string(remediation_info.get("recommendation", ""))
-            or _as_string(remediation_info.get("action", ""))
-            or _as_string(remediation_info.get("title", ""))
-        )
-        if suggestion:
-            return suggestion
-
-    # Try first app's inline remediation fields and remediation_info
-    apps = _as_list(raw.get("apps", []))
-    if len(apps) > 0 and type(apps[0]) == "dict":
-        first_app = apps[0]
-        app_remediation_info = first_app.get("remediation_info", {})
-        suggestion = (
-            _as_string(first_app.get("remediation", ""))
-            or _as_string(first_app.get("recommendation", ""))
-            or _as_string(first_app.get("action", ""))
-            or _as_string(first_app.get("title", ""))
-        )
-        if suggestion:
-            return suggestion
-        if type(app_remediation_info) == "dict":
-            suggestion = (
-                _as_string(app_remediation_info.get("recommendation", ""))
-                or _as_string(app_remediation_info.get("action", ""))
-                or _as_string(app_remediation_info.get("title", ""))
-            )
-            if suggestion:
-                return suggestion
-
-    return DEFAULT_REMEDIATION_GUIDANCE
-
-
-def _extract_fixed_in_version(remediation_obj):
-    """
-    Extract a fixed-in version string from a remediation entity's reference field.
-
-    Filters out KB articles and CVE identifiers, and only returns references
-    that look like version strings (contain both digits and dots).
-
-    Args:
-        remediation_obj: Remediation entity dict (or empty dict)
-
-    Returns:
-        Version string, or empty string if not a valid version reference
-    """
-    # Extract reference field from remediation object
-    ref = _as_string(remediation_obj.get("reference", ""))
-    if ref == "":
-        return ""
-
-    # Exclude KB articles and CVE identifiers (not version strings)
-    upper_ref = ref.upper()
-    if upper_ref.startswith("KB") or upper_ref.startswith("CVE-"):
-        return ""
-
-    without_digits = _remove_digits(ref)
-    has_digit = len(without_digits) != len(ref)
-    has_dot = len(ref.replace(".", "")) != len(ref)
-
-    if has_digit and has_dot:
-        return ref
-    return ""
 
 
 def _collect_mock_data(pb):
@@ -1366,7 +1272,7 @@ def _collect_mock_data(pb):
 
     vuln = pb.Vulnerability(
         instance_id="mock-aid-1",
-        cve="CVE-2024-0001",
+        cve="CVE-2026-0001",
         in_runtime=True,
         component=pb.Component(
             type=pb.ComponentType.APPLICATION,
@@ -1376,7 +1282,7 @@ def _collect_mock_data(pb):
         ),
         remediation=pb.Remediation(
             suggestion="Update to 1.0.1",
-            source="CrowdStrike",
+            source=CROWDSTRIKE_SOURCE,
         ),
         severity="medium",
         description="Mock vulnerability for offline testing",
