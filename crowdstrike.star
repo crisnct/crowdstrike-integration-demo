@@ -49,7 +49,7 @@ def main(**kwargs):
     - device_details_batch_size: Number of device IDs per details hydration request (default 100)
     - vuln_filter: Optional explicit FQL filter for vulnerabilities (default status:'open')
     """
-    log.info("❇️Step 0: Parsing configuration parameters...")
+    log.info("❇️ Step 0: Parsing configuration parameters...")
     api_url = kwargs.get("api_url", DEFAULT_API_URL).rstrip("/")
     client_id = kwargs.get("client_id", kwargs.get("api_key", ""))
     client_secret = kwargs.get("api_secret", "")
@@ -459,7 +459,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
     # Resolve effective FQL filter for Spotlight API
     effective_filter = _resolve_vuln_filter(vuln_filter)
-    log.info("🛡️ Effective vulnerability filter: %s" % effective_filter)
+    log.info("🚨️ Effective vulnerability filter: %s" % effective_filter)
 
     while True:
         if traversal["page"] > max_pages:
@@ -477,7 +477,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
             break
 
         stats["pages_processed"] += 1
-        log.info("🛡️ Vuln page %d: %d items" % (traversal["page"], len(vulns)))
+        log.info("🚨️ Vuln page %d: %d items" % (traversal["page"], len(vulns)))
 
         # Resolve remediation actions for this page (with run-level caching)
         remediation_stats = _hydrate_remediation_cache_for_page(
@@ -496,7 +496,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         )
         _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats)
 
-        log.info("🛡️ Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns)))
+        log.info("🚨 Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns)))
 
         # Advance pagination cursor or stop (see helper docstring for stop reasons).
         should_continue, stop_reason = _advance_vuln_state(
@@ -685,7 +685,7 @@ def _advance_vulnerability_pagination(next_after, last_after_key, page_count, pa
 
 def _log_vulnerability_summary(stats, remediation_ids_seen):
     log.info(
-        "🛡️ Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
+        "🐞 Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
         % (
             stats["pages_processed"],
             stats["collected_count"],
@@ -695,7 +695,7 @@ def _log_vulnerability_summary(stats, remediation_ids_seen):
         )
     )
     log.info(
-        "🛡️ Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
+        "🔫️️ Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
         % (
             len(remediation_ids_seen),
             stats["remediation_lookup_requests"],
@@ -703,7 +703,7 @@ def _log_vulnerability_summary(stats, remediation_ids_seen):
             stats["remediation_actions_resolved"],
         )
     )
-    log.info("🛡️ Suggestion source summary: cached_action=%d, inline_fallback=%d"
+    log.info("️🔫️ Suggestion source summary: cached_action=%d, inline_fallback=%d"
         % (
             stats["remediation_suggestion_cached_action"],
             stats["remediation_suggestion_inline_fallback"],
@@ -834,10 +834,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
         )
 
     # Resolve remediation action (prefer cached API action, fall back to inline suggestion)
-    remediation_obj = {}
-    rem_entities = _as_list((raw.get("remediation", {}) or {}).get("entities", []))
-    if len(rem_entities) > 0:
-        remediation_obj = rem_entities[0]
+    remediation_obj = _first_remediation_entity(raw)
 
     primary_remediation_id = _resolve_primary_remediation_id(raw)
     remediation_action = _resolve_action_from_cache(primary_remediation_id, remediation_cache)
@@ -1148,16 +1145,45 @@ def _resolve_primary_remediation_id(raw):
     if type(raw) != "dict":
         return ""
 
-    remediation_info = raw.get("remediation_info", {})
-    if type(remediation_info) == "dict":
-        recommended_id = _as_string(remediation_info.get("recommended_id", ""))
-        if recommended_id:
-            return recommended_id
-        minimum_id = _as_string(remediation_info.get("minimum_id", ""))
-        if minimum_id:
-            return minimum_id
+    recommended_id, minimum_id = _extract_recommended_and_minimum_ids(raw)
+    if recommended_id:
+        return recommended_id
+    if minimum_id:
+        return minimum_id
 
-    return _first_remediation_id(raw.get("remediation", {}))
+    top_level_fallback_id = _first_remediation_id(raw.get("remediation", {}))
+    if top_level_fallback_id:
+        return top_level_fallback_id
+
+    first_app = _first_app_dict(raw)
+    if type(first_app) == "dict":
+        return _first_remediation_id(first_app.get("remediation", {}))
+    return ""
+
+
+def _extract_recommended_and_minimum_ids(raw):
+    """
+    Extract recommended/minimum remediation IDs from vulnerability payload.
+
+    Prefers top-level remediation_info, then falls back to first app remediation_info.
+    """
+    recommended_id, minimum_id = _ids_from_remediation_info(raw.get("remediation_info", {}))
+    if recommended_id or minimum_id:
+        return recommended_id, minimum_id
+
+    first_app = _first_app_dict(raw)
+    if type(first_app) != "dict":
+        return "", ""
+    return _ids_from_remediation_info(first_app.get("remediation_info", {}))
+
+
+def _ids_from_remediation_info(remediation_info):
+    if type(remediation_info) != "dict":
+        return "", ""
+    return (
+        _as_string(remediation_info.get("recommended_id", "")),
+        _as_string(remediation_info.get("minimum_id", "")),
+    )
 
 
 def _first_remediation_id(remediation_value):
@@ -1186,6 +1212,35 @@ def _first_remediation_id(remediation_value):
     if entities and type(entities[0]) == "dict":
         return _as_string(entities[0].get("id", ""))
     return ""
+
+
+def _first_app_dict(raw):
+    if type(raw) != "dict":
+        return {}
+    apps = _as_list(raw.get("apps", []))
+    if apps and type(apps[0]) == "dict":
+        return apps[0]
+    return {}
+
+
+def _first_remediation_entity(raw):
+    """Return first remediation entity from top-level or first app remediation."""
+    if type(raw) != "dict":
+        return {}
+
+    top_level_remediation = raw.get("remediation", {})
+    if type(top_level_remediation) == "dict":
+        top_entities = _as_list(top_level_remediation.get("entities", []))
+        if top_entities and type(top_entities[0]) == "dict":
+            return top_entities[0]
+
+    first_app = _first_app_dict(raw)
+    app_remediation = first_app.get("remediation", {}) if type(first_app) == "dict" else {}
+    if type(app_remediation) == "dict":
+        app_entities = _as_list(app_remediation.get("entities", []))
+        if app_entities and type(app_entities[0]) == "dict":
+            return app_entities[0]
+    return {}
 
 
 def _resolve_action_from_cache(remediation_id, remediation_cache):
