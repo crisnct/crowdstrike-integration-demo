@@ -1,6 +1,6 @@
 # CrowdStrike Starlark integration script
-# Collects device assets and Spotlight vulnerabilities from the CrowdStrike
-# Falcon API and maps them to Zafran proto types.
+# Collects device assets and Spotlight vulnerabilities from the CrowdStrike Falcon API
+# and maps them to Zafran proto types.
 #
 # Structure:
 #   - main: Entry point that orchestrates the integration
@@ -49,9 +49,8 @@ def main(**kwargs):
     - device_details_batch_size: Number of device IDs per details hydration request (default 100)
     - vuln_filter: Optional explicit FQL filter for vulnerabilities (default status:'open')
     """
-    log.info("Step 0: Parsing configuration parameters...")
+    log.info("❇️Step 0: Parsing configuration parameters...")
     api_url = kwargs.get("api_url", DEFAULT_API_URL).rstrip("/")
-    log.info("Starting integration with API: %s" % api_url)
     client_id = kwargs.get("client_id", kwargs.get("api_key", ""))
     client_secret = kwargs.get("api_secret", "")
     page_size = _to_int(kwargs.get("page_size", str(DEFAULT_PAGE_SIZE)), DEFAULT_PAGE_SIZE)
@@ -64,33 +63,39 @@ def main(**kwargs):
     vuln_filter = kwargs.get("vuln_filter", "")
     mock_mode = _is_true(kwargs.get("mock_mode", "false"))
 
-    if page_size <= 0:
-        log.warn("Invalid page_size=%d; using default=%d" % (page_size, DEFAULT_PAGE_SIZE))
-        page_size = DEFAULT_PAGE_SIZE
-    if max_pages <= 0:
-        log.warn("Invalid max_pages=%d; using default=%d" % (max_pages, DEFAULT_MAX_PAGES))
-        max_pages = DEFAULT_MAX_PAGES
-    if max_retries <= 0:
-        log.warn("Invalid max_retries=%d; using default=%d" % (max_retries, DEFAULT_MAX_RETRIES))
-        max_retries = DEFAULT_MAX_RETRIES
-
     pb = zafran.proto_file
+    log.info("Starting integration with API: %s" % api_url)
 
     if mock_mode:
-        log.info(
-            "Starting mock run: page_size=%d, max_pages=%d, max_retries=%d"
+        log.info("🧪 Starting mock run: page_size=%d, max_pages=%d, max_retries=%d"
             % (page_size, max_pages, max_retries)
         )
         _collect_mock_data(pb)
         zafran.flush()
-        log.info("Mock run complete")
+        log.info("🧪 Mock run complete")
         return None
 
-    log.info("Step 1: Validating credentials...")
+    log.info("❇️ Step 1: Validating the input parameters...")
+    if page_size <= 0:
+        log.warn("⚠️ Invalid page_size=%d; using default=%d" % (page_size, DEFAULT_PAGE_SIZE))
+        page_size = DEFAULT_PAGE_SIZE
+    if max_pages <= 0:
+        log.warn("⚠️ Invalid max_pages=%d; using default=%d" % (max_pages, DEFAULT_MAX_PAGES))
+        max_pages = DEFAULT_MAX_PAGES
+    if max_retries <= 0:
+        log.warn("⚠️ Invalid max_retries=%d; using default=%d" % (max_retries, DEFAULT_MAX_RETRIES))
+        max_retries = DEFAULT_MAX_RETRIES
     if not client_id or not client_secret:
-        log.error("Missing client_id/api_key or api_secret")
+        log.error("❌ Missing client_id/api_key or api_secret")
         return None
+    if device_details_batch_size <= 0:
+        log.warn(
+            "⚠️ Invalid device_details_batch_size=%d; using default=%d"
+            % (device_details_batch_size, DEFAULT_DEVICE_DETAILS_BATCH_SIZE)
+        )
+        device_details_batch_size = DEFAULT_DEVICE_DETAILS_BATCH_SIZE
 
+    log.info("❇️ Step 2: Authenticating via OAuth2...")
     auth = {
         "api_url": api_url,
         "client_id": client_id,
@@ -98,37 +103,27 @@ def main(**kwargs):
         "token": "",
         "max_retries": max_retries,
     }
-
-    log.info("Step 2: Authenticating via OAuth2...")
     token = get_bearer_token(api_url, client_id, client_secret)
     if not token:
-        log.error("Authentication failed, aborting run")
+        log.error("❌ Authentication failed, aborting run")
         return None
     auth["token"] = token
-    log.info("Successfully obtained bearer token")
-
-    if device_details_batch_size <= 0:
-        log.warn(
-            "Invalid device_details_batch_size=%d; using default=%d"
-            % (device_details_batch_size, DEFAULT_DEVICE_DETAILS_BATCH_SIZE)
-        )
-        device_details_batch_size = DEFAULT_DEVICE_DETAILS_BATCH_SIZE
 
     log.info(
         "Starting run: page_size=%d, max_pages=%d, max_retries=%d, device_details_batch_size=%d"
         % (page_size, max_pages, max_retries, device_details_batch_size)
     )
 
-    log.info("Step 3: Collecting device assets...")
+    log.info("❇️ Step 3: Collecting device assets...")
     instance_ids = collect_devices(auth, page_size, max_pages, device_details_batch_size, pb)
-    log.info("Collected %d unique device instances" % len(instance_ids))
 
-    log.info("Step 4: Collecting vulnerabilities...")
+    log.info("❇️ Step 4: Collecting vulnerabilities...")
     collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, instance_ids)
 
-    log.info("Step 5: Flushing remaining collected data...")
+    log.info("❇️ Step 5: Flushing remaining collected data...")
     zafran.flush()
-    log.info("Integration completed successfully")
+
+    log.info("✅️ Data extracted successfully from CrowdStrike and collected into Zafran")
     return None
 
 
@@ -157,16 +152,17 @@ def get_bearer_token(api_url, client_id, client_secret):
     # POST to OAuth2 token endpoint
     resp = http.post(token_url, headers=headers, body=payload)
     if resp["status_code"] != 201 and resp["status_code"] != 200:
-        log.error("Token request failed: status=%d" % resp["status_code"])
-        log.error("Body: %s" % resp.get("body", "")[:400])
+        log.error("❌ Token request failed: status=%d" % resp["status_code"])
+        log.error("❌ Body: %s" % resp.get("body", "")[:400])
         return None
 
     # Extract access_token from response
     data = json.decode(resp.get("body", "{}") or "{}")
     token = data.get("access_token", "")
     if not token:
-        log.error("Token missing in response")
+        log.error("❌ Token missing in response")
         return None
+    log.info("✅ Successfully obtained bearer token")
     return token
 
 
@@ -192,21 +188,21 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
     while True:
         if page > max_pages:
             stats["stop_reason"] = "reached_max_pages"
-            log.warn("Reached max_pages while collecting devices: %d" % max_pages)
+            log.warn("⚠️ Reached max_pages while collecting devices: %d" % max_pages)
             break
 
         ids, next_offset = fetch_device_ids(auth, page_size, offset)
         if not ids:
             if page == 1:
                 stats["stop_reason"] = "no_devices_first_page"
-                log.info("No devices returned")
+                log.info("💻 No devices returned")
             else:
                 stats["stop_reason"] = "no_more_devices"
             break
 
         stats["pages_processed"] += 1
         stats["ids_requested"] += len(ids)
-        log.info("Devices page %d: %d ids" % (page, len(ids)))
+        log.info("💻 Devices page %d: %d ids" % (page, len(ids)))
         details_returned, instances_collected, instances_skipped = _collect_device_page_instances(
             auth,
             ids,
@@ -219,7 +215,7 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
         stats["instances_skipped"] += instances_skipped
 
         log.info(
-            "Collected device page %d (details_returned=%d, instances_collected=%d, instances_skipped=%d)"
+            "💻 Collected device page %d (details_returned=%d, instances_collected=%d, instances_skipped=%d)"
             % (page, details_returned, instances_collected, instances_skipped)
         )
 
@@ -233,9 +229,9 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
         if not should_continue:
             stats["stop_reason"] = stop_reason
             if stop_reason == "repeated_next_offset":
-                log.warn("Device cursor repeated, stopping pagination")
+                log.warn("⚠️ Device cursor repeated, stopping pagination")
             elif stop_reason == "non_int_offset_without_cursor":
-                log.warn("Offset is non-int without next cursor, stopping device pagination")
+                log.warn("⚠️ Offset is non-int without next cursor, stopping device pagination")
             break
 
         offset = new_offset
@@ -243,6 +239,7 @@ def collect_devices(auth, page_size, max_pages, device_details_batch_size, pb):
         page += 1
 
     _log_device_collection_summary(stats, known_ids)
+    log.info("💻 Collected %d unique device instances" % len(known_ids))
     return known_ids
 
 
@@ -290,7 +287,7 @@ def _advance_device_pagination(next_offset, last_offset_key, ids_count, page_siz
 
 def _log_device_collection_summary(stats, known_ids):
     log.info(
-        "Device summary: pages_processed=%d, ids_requested=%d, details_returned=%d, instances_collected=%d, instances_skipped=%d, unique_instances=%d, stop_reason=%s"
+        "💻 Device summary: pages_processed=%d, ids_requested=%d, details_returned=%d, instances_collected=%d, instances_skipped=%d, unique_instances=%d, stop_reason=%s"
         % (
             stats["pages_processed"],
             stats["ids_requested"],
@@ -366,7 +363,7 @@ def parse_device(raw, pb):
     """
     aid = raw.get("device_id") or raw.get("aid") or ""
     if not aid:
-        log.warn("Device missing AID/device_id, skipping")
+        log.warn("⚠️ Device missing AID/device_id, skipping")
         return None
 
     # Extract basic device attributes
@@ -462,12 +459,12 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
 
     # Resolve effective FQL filter for Spotlight API
     effective_filter = _resolve_vuln_filter(vuln_filter)
-    log.info("Effective vulnerability filter: %s" % effective_filter)
+    log.info("🛡️ Effective vulnerability filter: %s" % effective_filter)
 
     while True:
         if traversal["page"] > max_pages:
             _set_vuln_stop_reason(stats, "reached_max_pages")
-            log.warn("Reached max_pages while collecting vulnerabilities: %d" % max_pages)
+            log.warn("⚠️ Reached max_pages while collecting vulnerabilities: %d" % max_pages)
             break
 
         vulns, next_after = fetch_vulnerabilities(auth, page_size, traversal["after_token"], effective_filter)
@@ -480,7 +477,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
             break
 
         stats["pages_processed"] += 1
-        log.info("Vuln page %d: %d items" % (traversal["page"], len(vulns)))
+        log.info("🛡️ Vuln page %d: %d items" % (traversal["page"], len(vulns)))
 
         # Resolve remediation actions for this page (with run-level caching)
         remediation_stats = _hydrate_remediation_cache_for_page(
@@ -499,7 +496,7 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         )
         _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats)
 
-        log.info("Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns)))
+        log.info("🛡️ Collected vulnerability page %d (%d vulns)" % (traversal["page"], len(vulns)))
 
         # Advance pagination cursor or stop (see helper docstring for stop reasons).
         should_continue, stop_reason = _advance_vuln_state(
@@ -511,9 +508,9 @@ def collect_vulnerabilities(auth, page_size, max_pages, vuln_filter, pb, known_i
         if not should_continue:
             _set_vuln_stop_reason(stats, stop_reason)
             if stop_reason == "repeated_after_token":
-                log.warn("Vulnerability cursor repeated, stopping pagination")
+                log.warn("⚠️ Vulnerability cursor repeated, stopping pagination")
             elif stop_reason == "missing_after_token":
-                log.warn("No after token returned with full page, stopping vulnerability pagination")
+                log.warn("⚠️ No after token returned with full page, stopping vulnerability pagination")
             break
 
     _log_vulnerability_summary(stats, remediation_ids_seen)
@@ -689,7 +686,7 @@ def _advance_vulnerability_pagination(next_after, last_after_key, page_count, pa
 
 def _log_vulnerability_summary(stats, remediation_ids_seen):
     log.info(
-        "Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
+        "🛡️ Vulnerability summary: pages_processed=%d, collected=%d, skipped_missing_instance_id=%d, skipped_unknown_instance=%d, stop_reason=%s"
         % (
             stats["pages_processed"],
             stats["collected_count"],
@@ -699,7 +696,7 @@ def _log_vulnerability_summary(stats, remediation_ids_seen):
         )
     )
     log.info(
-        "Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
+        "🛡️ Remediation summary: ids_discovered=%d, lookup_requests=%d, cache_hits=%d, actions_resolved=%d"
         % (
             len(remediation_ids_seen),
             stats["remediation_lookup_requests"],
@@ -707,8 +704,7 @@ def _log_vulnerability_summary(stats, remediation_ids_seen):
             stats["remediation_actions_resolved"],
         )
     )
-    log.info(
-        "Suggestion source summary: from_api=%d, fallback=%d"
+    log.info("🛡️ Suggestion source summary: from_api=%d, fallback=%d"
         % (
             # Keep `from_api` label for downstream compatibility; value reflects cache/API-backed resolution path.
             stats["remediation_suggestion_from_cache"],
@@ -801,7 +797,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
     cve_obj = raw.get("cve", {}) or {}
     cve = cve_obj.get("id") or raw.get("vulnerability_id", "")
     if not cve:
-        log.warn("Vulnerability missing CVE/id, skipping")
+        log.warn("⚠️ Vulnerability missing CVE/id, skipping")
         return None, False
 
     # Build affected component from apps data
@@ -907,10 +903,10 @@ def _authed_get(auth, url):
         status_code = resp["status_code"]
 
         if status_code == 401 and attempt < max_retries:
-            log.info("401 received; refreshing bearer token and retrying")
+            log.info("❌ 401 received; refreshing bearer token and retrying")
             refreshed = get_bearer_token(auth["api_url"], auth["client_id"], auth["client_secret"])
             if not refreshed:
-                log.error("Token refresh failed")
+                log.error("❌ Token refresh failed")
                 return None
             auth["token"] = refreshed
             attempt += 1
@@ -920,13 +916,13 @@ def _authed_get(auth, url):
         if _should_retry(status_code) and attempt < max_retries:
             attempt += 1
             _sleep_with_backoff(attempt)
-            log.warn("Retrying HTTP request: status=%d attempt=%d/%d" % (status_code, attempt, max_retries))
+            log.warn("⚠️ Retrying HTTP request: status=%d attempt=%d/%d" % (status_code, attempt, max_retries))
             continue
         break
 
     if resp["status_code"] != 200:
-        log.error("GET failed: url=%s status=%d" % (url, resp["status_code"]))
-        log.error("Body: %s" % (resp.get("body", "")[:400]))
+        log.error("❌ GET failed: url=%s status=%d" % (url, resp["status_code"]))
+        log.error("❌ Body: %s" % (resp.get("body", "")[:400]))
         return None
 
     body = resp.get("body", "")
@@ -934,7 +930,7 @@ def _authed_get(auth, url):
         return {}
     decoded = json.decode(body)
     if type(decoded) == "string":
-        log.error("Decoded body is string, expected object/array: %s" % decoded[:200])
+        log.error("❌ Decoded body is string, expected object/array: %s" % decoded[:200])
         return {}
     return decoded
 
