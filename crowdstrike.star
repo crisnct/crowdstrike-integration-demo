@@ -64,6 +64,16 @@ def main(**kwargs):
     vuln_filter = kwargs.get("vuln_filter", "")
     mock_mode = _is_true(kwargs.get("mock_mode", "false"))
 
+    if page_size <= 0:
+        log.warn("Invalid page_size=%d; using default=%d" % (page_size, DEFAULT_PAGE_SIZE))
+        page_size = DEFAULT_PAGE_SIZE
+    if max_pages <= 0:
+        log.warn("Invalid max_pages=%d; using default=%d" % (max_pages, DEFAULT_MAX_PAGES))
+        max_pages = DEFAULT_MAX_PAGES
+    if max_retries <= 0:
+        log.warn("Invalid max_retries=%d; using default=%d" % (max_retries, DEFAULT_MAX_RETRIES))
+        max_retries = DEFAULT_MAX_RETRIES
+
     pb = zafran.proto_file
 
     if mock_mode:
@@ -139,7 +149,10 @@ def get_bearer_token(api_url, client_id, client_secret):
     """
     token_url = api_url + "/oauth2/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    payload = "client_id=%s&client_secret=%s" % (client_id, client_secret)
+    payload = "client_id=%s&client_secret=%s" % (
+        _form_url_encode(client_id),
+        _form_url_encode(client_secret),
+    )
 
     # POST to OAuth2 token endpoint
     resp = http.post(token_url, headers=headers, body=payload)
@@ -794,7 +807,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
     # Build affected component from apps data
     apps = _as_list(raw.get("apps", []))
     component = None
-    if len(apps) > 0:
+    if len(apps) > 0 and type(apps[0]) == "dict":
         app = apps[0]
         component = pb.Component(
             type=pb.ComponentType.APPLICATION,
@@ -845,7 +858,7 @@ def parse_vulnerability(raw, pb, remediation_cache):
         fixed_in_version=_extract_fixed_in_version(remediation_obj),
     )
 
-    severity = cve_obj.get("severity", "").lower()
+    severity = _as_string(cve_obj.get("severity", "")).lower()
 
     # Assemble and return Vulnerability protobuf
     finding = pb.Vulnerability(
@@ -1099,7 +1112,17 @@ def _first_from_list(arr):
         return ""
     if not arr:
         return ""
-    return arr[0]
+    return _as_string(arr[0])
+
+
+def _form_url_encode(value):
+    encoded = _as_string(value)
+    encoded = encoded.replace("%", "%25")
+    encoded = encoded.replace("&", "%26")
+    encoded = encoded.replace("=", "%3D")
+    encoded = encoded.replace("+", "%2B")
+    encoded = encoded.replace(" ", "%20")
+    return encoded
 
 
 def _collect_page_remediation_ids(vulns):
