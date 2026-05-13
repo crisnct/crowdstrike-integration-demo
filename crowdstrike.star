@@ -537,8 +537,8 @@ def _new_vulnerability_stats():
         "remediation_lookup_requests": 0,
         "remediation_cache_hits": 0,
         "remediation_actions_resolved": 0,
-        "remediation_suggestion_from_cache": 0,
-        "remediation_suggestion_fallback": 0,
+        "remediation_suggestion_cached_action": 0,
+        "remediation_suggestion_inline_fallback": 0,
         "stop_reason": "completed",
     }
 
@@ -552,9 +552,8 @@ def _apply_page_results_to_stats(stats, remediation_stats, page_collection_stats
     stats["collected_count"] += page_collection_stats.get("collected_count", 0)
     stats["skipped_missing_instance_id"] += page_collection_stats.get("skipped_missing_instance_id", 0)
     stats["skipped_unknown_instance"] += page_collection_stats.get("skipped_unknown_instance", 0)
-    # Keep legacy "from_api" summary field name for compatibility with existing logs.
-    stats["remediation_suggestion_from_cache"] += page_collection_stats.get("remediation_suggestion_from_cache", 0)
-    stats["remediation_suggestion_fallback"] += page_collection_stats.get("remediation_suggestion_fallback", 0)
+    stats["remediation_suggestion_cached_action"] += page_collection_stats.get("remediation_suggestion_cached_action", 0)
+    stats["remediation_suggestion_inline_fallback"] += page_collection_stats.get("remediation_suggestion_inline_fallback", 0)
 
 
 def _hydrate_remediation_cache_for_page(auth, vulns, remediation_cache, remediation_ids_seen):
@@ -608,14 +607,14 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
       - collected_count
       - skipped_missing_instance_id
       - skipped_unknown_instance
-      - remediation_suggestion_from_cache
-      - remediation_suggestion_fallback
+      - remediation_suggestion_cached_action
+      - remediation_suggestion_inline_fallback
     """
     collected_count = 0
     skipped_missing_instance_id = 0
     skipped_unknown_instance = 0
-    remediation_suggestion_from_cache = 0
-    remediation_suggestion_fallback = 0
+    remediation_suggestion_cached_action = 0
+    remediation_suggestion_inline_fallback = 0
 
     for raw_vuln in vulns:
         finding, used_cached_action = parse_vulnerability(raw_vuln, pb, remediation_cache)
@@ -631,16 +630,16 @@ def _collect_vulnerabilities_for_page(vulns, pb, remediation_cache, known_instan
         zafran.collect_vulnerability(finding)
         collected_count += 1
         if used_cached_action:
-            remediation_suggestion_from_cache += 1
+            remediation_suggestion_cached_action += 1
         else:
-            remediation_suggestion_fallback += 1
+            remediation_suggestion_inline_fallback += 1
 
     return {
         "collected_count": collected_count,
         "skipped_missing_instance_id": skipped_missing_instance_id,
         "skipped_unknown_instance": skipped_unknown_instance,
-        "remediation_suggestion_from_cache": remediation_suggestion_from_cache,
-        "remediation_suggestion_fallback": remediation_suggestion_fallback,
+        "remediation_suggestion_cached_action": remediation_suggestion_cached_action,
+        "remediation_suggestion_inline_fallback": remediation_suggestion_inline_fallback,
     }
 
 
@@ -704,11 +703,10 @@ def _log_vulnerability_summary(stats, remediation_ids_seen):
             stats["remediation_actions_resolved"],
         )
     )
-    log.info("🛡️ Suggestion source summary: from_api=%d, fallback=%d"
+    log.info("🛡️ Suggestion source summary: cached_action=%d, inline_fallback=%d"
         % (
-            # Keep `from_api` label for downstream compatibility; value reflects cache/API-backed resolution path.
-            stats["remediation_suggestion_from_cache"],
-            stats["remediation_suggestion_fallback"],
+            stats["remediation_suggestion_cached_action"],
+            stats["remediation_suggestion_inline_fallback"],
         )
     )
 
@@ -841,8 +839,8 @@ def parse_vulnerability(raw, pb, remediation_cache):
     if len(rem_entities) > 0:
         remediation_obj = rem_entities[0]
 
-    priority_remediation_ids = _extract_priority_remediation_ids(raw)
-    remediation_action = _resolve_action_from_cache(priority_remediation_ids, remediation_cache)
+    primary_remediation_id = _resolve_primary_remediation_id(raw)
+    remediation_action = _resolve_action_from_cache(primary_remediation_id, remediation_cache)
     used_cached_action = remediation_action != ""
     if remediation_action == "":
         remediation_action = _resolve_remediation_suggestion(raw, remediation_obj)
@@ -1125,76 +1123,85 @@ def _collect_page_remediation_ids(vulns):
     seen = {}
     ordered = []
     for raw_vuln in vulns:
-        for rid in _extract_priority_remediation_ids(raw_vuln):
-            if rid and not seen.get(rid, False):
-                seen[rid] = True
-                ordered.append(rid)
+        rid = _resolve_primary_remediation_id(raw_vuln)
+        if rid and not seen.get(rid, False):
+            seen[rid] = True
+            ordered.append(rid)
     return ordered
 
 
-def _extract_priority_remediation_ids(raw):
+def _resolve_primary_remediation_id(raw):
     """
-    Extract ordered, deduplicated remediation IDs from a vulnerability's apps.
+    Resolve the primary remediation ID for a vulnerability.
 
-    Prioritizes recommended_id and minimum_id from remediation_info, then
-    falls back to the remediation.ids array.
+    Priority order:
+      1) remediation_info.recommended_id
+      2) remediation_info.minimum_id
+      3) first ID from remediation payload
 
     Args:
         raw: Raw vulnerability dict from the Spotlight API
 
     Returns:
-        List of unique remediation ID strings in priority order
+        A remediation ID string, or empty string when none can be resolved
     """
-    ordered = []
-    seen = {}
     if type(raw) != "dict":
-        return ordered
+        return ""
 
-    apps = _as_list(raw.get("apps", []))
-    for app in apps:
-        if type(app) != "dict":
-            continue
+    remediation_info = raw.get("remediation_info", {})
+    if type(remediation_info) == "dict":
+        recommended_id = _as_string(remediation_info.get("recommended_id", ""))
+        if recommended_id:
+            return recommended_id
+        minimum_id = _as_string(remediation_info.get("minimum_id", ""))
+        if minimum_id:
+            return minimum_id
 
-        # Collect recommended and minimum remediation IDs from remediation_info
-        remediation_info = app.get("remediation_info", {})
-        if type(remediation_info) == "dict":
-            for rid in [
-                _as_string(remediation_info.get("recommended_id", "")),
-                _as_string(remediation_info.get("minimum_id", "")),
-            ]:
-                if rid and not seen.get(rid, False):
-                    seen[rid] = True
-                    ordered.append(rid)
-
-        # Collect additional remediation IDs from remediation.ids array
-        remediation_obj = app.get("remediation", {})
-        if type(remediation_obj) == "dict":
-            remediation_ids = _as_list(remediation_obj.get("ids", []))
-            for rid in remediation_ids:
-                rid_str = _as_string(rid)
-                if rid_str and not seen.get(rid_str, False):
-                    seen[rid_str] = True
-                    ordered.append(rid_str)
-
-    return ordered
+    return _first_remediation_id(raw.get("remediation", {}))
 
 
-def _resolve_action_from_cache(priority_ids, remediation_cache):
+def _first_remediation_id(remediation_value):
+    """Extract the first remediation ID from a remediation payload."""
+    if type(remediation_value) == "string":
+        return remediation_value
+    if type(remediation_value) == "list":
+        if not remediation_value:
+            return ""
+        first = remediation_value[0]
+        if type(first) == "dict":
+            return _as_string(first.get("id", ""))
+        return _as_string(first)
+    if type(remediation_value) != "dict":
+        return ""
+
+    direct_id = _as_string(remediation_value.get("id", ""))
+    if direct_id:
+        return direct_id
+
+    remediation_ids = _as_list(remediation_value.get("ids", []))
+    if remediation_ids:
+        return _as_string(remediation_ids[0])
+
+    entities = _as_list(remediation_value.get("entities", []))
+    if entities and type(entities[0]) == "dict":
+        return _as_string(entities[0].get("id", ""))
+    return ""
+
+
+def _resolve_action_from_cache(remediation_id, remediation_cache):
     """
-    Look up the first matching remediation action from the cache by priority order.
+    Look up remediation action text from cache for one remediation ID.
 
     Args:
-        priority_ids: Ordered list of remediation ID strings to try
+        remediation_id: Remediation ID string
         remediation_cache: Dict of remediation ID -> action text
 
     Returns:
-        Action text string for the first hit, or empty string if none found
+        Action text string, or empty string when not found
     """
-    for rid in priority_ids:
-        action = _as_string(remediation_cache.get(rid, ""))
-        if action:
-            return action
-    return ""
+    if not remediation_id:
+        return ""
+    return _as_string(remediation_cache.get(remediation_id, ""))
 
 
 def _resolve_remediation_suggestion(raw, remediation_obj):
